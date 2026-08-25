@@ -375,7 +375,7 @@ window.__museum = {
     textures: renderer.info.memory.textures, room: currentKey,
     materialStats: materials.stats ? materials.stats() : null,
   }),
-  __scene: scene,
+  __scene: scene, __camera: camera,
   dims: () => arch.DIMENSIONS,
   /** 驗收截圖：必須在同一個 task 內 render 後立刻讀，否則 drawingBuffer 已被清除 */
   capture: () => { renderFrame(); return renderer.domElement.toDataURL('image/png'); },

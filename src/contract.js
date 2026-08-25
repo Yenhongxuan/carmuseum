@@ -43,7 +43,10 @@ export const STATE = {
   alive: [],        // string[]  尚未被淘汰的 car id
   visited: {},      // { [roomName]: { enters:number, ms:number } }
   stances: [],      // 廳六用過的立場 { id, label, eliminated:string[], usedAt:number }
-  slot: { len:500, wid:240, hei:200 },   // 使用者自家車位（公分）
+  // ★ 預設值 = 台灣常見機械車位（長500 × 寬200 × 高165 cm）。
+  // 這是「使用者假設值」，不是規格，廳二可自由調整；選它是因為 500×240×200 下 39 台全過，
+  // 廳二「它進不進得去你家」的主題會完全落空。詳見 VERIFY.md 裁決①。
+  slot: { len:500, wid:200, hei:165 },   // 使用者自家車位（公分）
   useDaysPerYear: 52,
   chosenCarId: null,   // 被告席上的車
   removedRegrets: [],  // 廳五已移除的減速帶編號

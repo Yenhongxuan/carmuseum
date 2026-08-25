@@ -60,8 +60,8 @@ const hdrRT = new THREE.WebGLRenderTarget(1, 1, {
 const postMaterial = new THREE.ShaderMaterial({
   uniforms: {
     tDiffuse: { value: null }, uRes: { value: new THREE.Vector2(1, 1) },
-    uExposure: { value: 1.0 }, uVignette: { value: 0.10 },
-    uCA: { value: 0.0015 }, uGrain: { value: 0.022 }, uTime: { value: 0 },
+    uExposure: { value: 1.0 }, uVignette: { value: 0.22 },
+    uCA: { value: 0.00075 }, uGrain: { value: 0.022 }, uTime: { value: 0 },
   },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
   fragmentShader: `

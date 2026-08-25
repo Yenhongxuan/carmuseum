@@ -116,12 +116,15 @@ function worley(seed, cells) {
     const x = u * C, y = v * C;
     const cx = Math.floor(x), cy = Math.floor(y);
     let f1 = 1e18, f2 = 1e18, id = 0;
+    const cxm = ((cx % C) + C) % C, cym = ((cy % C) + C) % C;
     for (let dy = -1; dy <= 1; dy++) {
-      const gy = ((cy + dy) % C + C) % C;
+      let gy = cym + dy; if (gy < 0) gy += C; else if (gy >= C) gy -= C;
+      const row = gy * C;
+      const sy0 = cy + dy;
       for (let dx = -1; dx <= 1; dx++) {
-        const gx = ((cx + dx) % C + C) % C;
-        const k = gy * C + gx;
-        const ddx = x - (cx + dx + px[k]), ddy = y - (cy + dy + py[k]);
+        let gx = cxm + dx; if (gx < 0) gx += C; else if (gx >= C) gx -= C;
+        const k = row + gx;
+        const ddx = x - (cx + dx + px[k]), ddy = y - (sy0 + py[k]);
         const d2 = ddx * ddx + ddy * ddy;          // 只比平方，最後才 sqrt
         if (d2 < f1) { f2 = f1; f1 = d2; id = pid[k]; }
         else if (d2 < f2) { f2 = d2; }
@@ -175,12 +178,13 @@ function heightToNormal(H, S, depthMM, tileX, tileY) {
   const dz = depthMM * 0.001;               // mm -> m
   const psx = tileX / S, psy = tileY / S;   // 每 texel 的世界尺寸（公尺）
   for (let y = 0; y < S; y++) {
-    const ym = ((y - 1) + S) % S, yp = (y + 1) % S;
+    const ym = (y === 0) ? S - 1 : y - 1, yp = (y === S - 1) ? 0 : y + 1;
+    const rm = ym * S, r0 = y * S, rp = yp * S;
     for (let x = 0; x < S; x++) {
-      const xm = ((x - 1) + S) % S, xp = (x + 1) % S;
-      const h00 = H[ym * S + xm], h10 = H[ym * S + x], h20 = H[ym * S + xp];
-      const h01 = H[y * S + xm], h21 = H[y * S + xp];
-      const h02 = H[yp * S + xm], h12 = H[yp * S + x], h22 = H[yp * S + xp];
+      const xm = (x === 0) ? S - 1 : x - 1, xp = (x === S - 1) ? 0 : x + 1;
+      const h00 = H[rm + xm], h10 = H[rm + x], h20 = H[rm + xp];
+      const h01 = H[r0 + xm], h21 = H[r0 + xp];
+      const h02 = H[rp + xm], h12 = H[rp + x], h22 = H[rp + xp];
       const gx = ((h20 + 2 * h21 + h22) - (h00 + 2 * h01 + h02)) / 8;
       const gy = ((h02 + 2 * h12 + h22) - (h00 + 2 * h10 + h20)) / 8;
       // 斜率（世界尺度）。canvas 的 +y 向下，貼圖 flipY=true 之後 v 向上，故 G 取 +gy。
@@ -195,6 +199,27 @@ function heightToNormal(H, S, depthMM, tileX, tileY) {
     }
   }
   return rgbaToCanvas(A, S);
+}
+
+/**
+ * 把噪聲預先算在 Q×Q 格點上，主迴圈改用雙線性內插取樣（仍然無縫）。
+ * 1024×1024 的貼圖若每個 texel 都跑 3–4 階 fbm 會慢到卡畫面，這是關鍵優化。
+ */
+function bakeField(fn, Q) {
+  const F = new Float32Array(Q * Q);
+  for (let y = 0; y < Q; y++) {
+    for (let x = 0; x < Q; x++) F[y * Q + x] = fn(x / Q, y / Q);
+  }
+  return F;
+}
+function sampleField(F, Q, u, v) {
+  const x = u * Q, y = v * Q;
+  let x0 = Math.floor(x), y0 = Math.floor(y);
+  const fx = x - x0, fy = y - y0;
+  x0 = ((x0 % Q) + Q) % Q; y0 = ((y0 % Q) + Q) % Q;
+  const x1 = (x0 + 1) % Q, y1 = (y0 + 1) % Q;
+  const a = F[y0 * Q + x0], b = F[y0 * Q + x1], c = F[y1 * Q + x0], d = F[y1 * Q + x1];
+  return lerp(lerp(a, b, fx), lerp(c, d, fx), fy);
 }
 
 /** 在場上蓋一個圓（會 wrap），cb(dist01, idx) 回傳的值交給 apply。 */
@@ -343,10 +368,11 @@ export function createMaterialLibrary(ctx) {
     const perPlankPx = S / Math.max(1, Math.round(TX / o.plankLen));
     const seamU = Math.max(1, 0.001 / TX * S);                // 1mm 接縫
     const seamV = Math.max(1, 0.001 / TY * S);
-    const warpN = fbm(o.seed + 23, 3, 3);
-    const wearN = fbm(o.seed + 37, 2, 3);
+    const QF = 256;
+    const fWarp = bakeField(fbm(o.seed + 23, 3, 3), QF);
+    const fWear = bakeField(fbm(o.seed + 37, 2, 3), QF);
+    const fMod = bakeField(fbm(o.seed + 71, 6, 3), QF);
     const fineN = valueNoise(o.seed + 53, 256);
-    const modN = fbm(o.seed + 71, 6, 3);
     const c0 = hx(0xE8DFD0), c1 = hx(0xD4C6B0), cSeam = hx(0x9A8C78);
     const ringsPerPlank = Math.max(8, Math.round(o.plankW / 0.003)); // 約 3mm 一道木紋
 
@@ -388,8 +414,8 @@ export function createMaterialLibrary(ctx) {
         const seam = (dEnd < seamU || dRow < seamV) ? 1 : 0;
 
         // 木紋
-        const warp = (warpN(u * 0.9, j * 0.31 + 0.17) - 0.5) * 1.7;
-        const mod = (modN(u * 1.0, v) - 0.5) * 0.35;
+        const warp = (sampleField(fWarp, QF, u * 0.9, j * 0.31 + 0.17) - 0.5) * 1.7;
+        const mod = (sampleField(fMod, QF, u, v) - 0.5) * 0.35;
         let ring = vL * ringsPerPlank * (1 + mod) + warp * 3.0 + ri.tone * 17;
         let gr = Math.abs(frac(ring) * 2 - 1);
         gr = Math.pow(1 - gr, 3.2);                        // 尖銳暗紋
@@ -402,7 +428,7 @@ export function createMaterialLibrary(ctx) {
         r8 *= dark; g8 *= dark * 0.998; b8 *= dark * 0.995;
 
         // Roughness
-        const w = wearN(u, v);
+        const w = sampleField(fWear, QF, u, v);
         let rough = lerp(o.wearLow, o.wearHigh, smooth01((w - 0.22) / 0.56));
         rough += ri.rough + gr * 0.05 + fine * 0.02;
 
@@ -784,20 +810,21 @@ export function createMaterialLibrary(ctx) {
     const S = 1024, tile = [2.0, 2.0];
     const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
     const rn = mulberry32(5001);
-    const mottle = fbm(5002, 3, 4);
-    const mid = fbm(5003, 12, 3);
-    const oilN = fbm(5004, 2, 3);
+    const QM = 512, QL = 256;
+    const fMottle = bakeField(fbm(5002, 3, 4), QM);
+    const fMid = bakeField(fbm(5003, 12, 3), QM);
+    const fOil = bakeField(fbm(5004, 2, 3), QL);
+    const fEdge = bakeField(fbm(5008, 2, 2), QL);
     const patchCell = worley(5005, 3);          // 修補區塊
     const agg = worley(5006, 256);              // ★ 骨材顆粒
     const aggFine = worley(5007, 420);
-    const edgeN = fbm(5008, 2, 2);
     const cLo = hx(0x4A4A4C), cHi = hx(0x6B6B6E);
 
     for (let y = 0; y < S; y++) {
       const v = y / S;
       for (let x = 0; x < S; x++) {
         const u = x / S, p = y * S + x, i = p * 4;
-        const mo = mottle(u, v) * 0.6 + mid(u, v) * 0.4;
+        const mo = sampleField(fMottle, QM, u, v) * 0.6 + sampleField(fMid, QM, u, v) * 0.4;
         let t = clamp01((mo - 0.28) / 0.46);
         let r8 = lerp(cLo[0], cHi[0], t), g8 = lerp(cLo[1], cHi[1], t), b8 = lerp(cLo[2], cHi[2], t);
 
@@ -827,10 +854,10 @@ export function createMaterialLibrary(ctx) {
         // ★ 輪胎痕：沿 u（行車方向）兩條略深長條
         const lane1 = Math.exp(-Math.pow((v - 0.30) / 0.085, 2));
         const lane2 = Math.exp(-Math.pow((v - 0.72) / 0.085, 2));
-        const tire = clamp01((lane1 + lane2) * (0.6 + 0.4 * mid(u * 0.3, v)));
+        const tire = clamp01((lane1 + lane2) * (0.6 + 0.4 * sampleField(fMid, QM, u * 0.3, v)));
 
         // ★ 油漬：深色不規則斑塊
-        const oil = Math.pow(clamp01((oilN(u, v) - 0.615) * 4.6), 1.5);
+        const oil = Math.pow(clamp01((sampleField(fOil, QL, u, v) - 0.615) * 4.6), 1.5);
         if (oil > 0.001) {
           const k = oil * 0.9;
           r8 = lerp(r8, 42, k); g8 = lerp(g8, 42, k); b8 = lerp(b8, 44, k);
@@ -843,7 +870,7 @@ export function createMaterialLibrary(ctx) {
         let rough = 0.88 + (rn() - 0.5) * 0.03 - gShape * 0.02;
         rough = lerp(rough, 0.72, tire * 0.85);
         rough = lerp(rough, 0.55, oil);
-        rough = lerp(rough, 0.93, Math.pow(clamp01((edgeN(u, v) - 0.6) * 3.0), 1.5) * 0.7);
+        rough = lerp(rough, 0.93, Math.pow(clamp01((sampleField(fEdge, QL, u, v) - 0.6) * 3.0), 1.5) * 0.7);
         R[p] = rough;
 
         // Height：base 0.45（heightMM=4）→ 骨材凸起最多 2mm

@@ -475,7 +475,7 @@ export function buildGallery(ctx) {
   }
 
   const dc = bag.flush(root, { 'plinth': { cast: true }, 'skirting': { cast: false } });
-  DIMENSIONS.gallery.drawCallEstimate = dc + 1 + slots.length * 3;
+  DIMENSIONS.gallery.drawCallEstimate = dc + 2 + slots.length * 3;
   root.userData.dimensions = DIMENSIONS.gallery;
   return root;
 }
@@ -758,7 +758,7 @@ export function buildLot(ctx) {
   root.add(skyDome(ctx, 300));
 
   const dc = bag.flush(root, { 'roadline': { cast: false }, 'curb': { cast: true } });
-  DIMENSIONS.lot.drawCallEstimate = dc + 9;
+  DIMENSIONS.lot.drawCallEstimate = dc + 11;
   root.userData.dimensions = DIMENSIONS.lot;
   root.userData.cellField = DIMENSIONS.lot.cellField;
   return root;
@@ -1037,11 +1037,11 @@ function buildBankTable(THREE, curve, N) {
     const k01 = clamp((kappa - 0.0015) / (0.030 - 0.0015), 0, 1);
     raw[i] = k01 <= 0 ? 0 : sgn * (R5.BANK_MIN + (R5.BANK_MAX - R5.BANK_MIN) * k01) * Math.PI / 180;
   }
-  // 三次箱型平滑（±14 取樣 ≈ ±30 m）→ 進出彎的傾斜是漸變的，不會突然折起來
+  // 三次箱型平滑（±6 取樣 ≈ ±26 m）→ 進出彎的傾斜是漸變的，但髮夾的峰值不會被抹平
   let cur = raw;
   for (let pass = 0; pass < 3; pass++) {
     const out = new Float32Array(N);
-    const rad = 14;
+    const rad = 6;
     for (let i = 0; i < N; i++) {
       let s = 0;
       for (let k = -rad; k <= rad; k++) s += cur[(i + k + N * 2) % N];
@@ -1064,7 +1064,7 @@ export function buildCircuit(ctx) {
   const BN = 720;
   const bankTable = buildBankTable(THREE, curve, BN);
 
-  const _p = new THREE.Vector3(), _t = new THREE.Vector3(), _u = new THREE.Vector3();
+  const _worldUp = new THREE.Vector3(0, 1, 0);
 
   /** ★ B7 唯一的定位來源。u ∈ [0,1)，pos 即路面中心點。 */
   function sampleAt(u) {
@@ -1073,7 +1073,9 @@ export function buildCircuit(ctx) {
     const tangent = curve.getTangentAt(uu).normalize();
     const f = uu * BN, i0 = Math.floor(f) % BN, i1 = (i0 + 1) % BN, fr = f - Math.floor(f);
     const bank = bankTable[i0] * (1 - fr) + bankTable[i1] * fr;
-    const up = new THREE.Vector3(0, 1, 0).applyAxisAngle(tangent, bank);
+    // up 必須與 tangent 正交（賽道有 ±19.5 m 起伏，直接用世界 Y 會不正交）
+    const right0 = new THREE.Vector3().copy(tangent).cross(_worldUp).normalize();
+    const up = right0.clone().cross(tangent).normalize().applyAxisAngle(tangent, bank);
     return { pos, tangent, up, bank };
   }
 
@@ -1371,7 +1373,7 @@ export function buildCircuit(ctx) {
   DIMENSIONS.circuit.lengthM = Math.round(lengthM * 10) / 10;
   DIMENSIONS.circuit.elevationRange = Math.round((19.5 - 0) * 10) / 10;
   DIMENSIONS.circuit.startU = startU;
-  DIMENSIONS.circuit.drawCallEstimate = dc + 10;
+  DIMENSIONS.circuit.drawCallEstimate = dc + 11;
   root.userData.dimensions = DIMENSIONS.circuit;
 
   return {
@@ -1384,3 +1386,294 @@ export function buildCircuit(ctx) {
     bankTable,
   };
 }
+
+/* ==========================================================================
+ * 7. 廳六 · 法庭
+ * ========================================================================== */
+
+export function buildCourt(ctx) {
+  const THREE = ctx.THREE;
+  const root = new THREE.Group();
+  root.name = 'arch.court';
+  const bag = GeoBag(ctx);
+
+  const hw = C6.W / 2, hd = C6.D / 2, hs = C6.SKY_W / 2;
+
+  /* ---- 7.1 石板地：真的一塊一塊，並帶 0.3% 的微凹（老石地會沉）---- */
+  const courtH = (x, z) => -0.004 * ((x / hw) * (x / hw) + (z / hd) * (z / hd));
+  const slab = bevelBox(THREE, 0.995, 0.05, 0.995, 0.0025);
+  const slabI = [];
+  for (let i = 0; i < C6.W; i++) {
+    for (let k = 0; k < C6.D; k++) {
+      const x = -hw + 0.5 + i, z = -hd + 0.5 + k;
+      slabI.push({ p: [x, -0.025 + courtH(x, z), z] });
+    }
+  }
+  root.add(instanced(ctx, slab, 'court.stone', slabI, { cast: false }));
+  bag.add('plinth', place(bevelBox(THREE, C6.W, 0.10, C6.D), 0, -0.10, 0));   // 墊層
+
+  /* ---- 7.2 前後牆 + 兩側「柱間壁龕」牆（壁龕是真的凹進去，不是貼片）---- */
+  bag.add('court.stone', place(bevelBox(THREE, C6.W + C6.WALL_T * 2, C6.H, C6.WALL_T), 0, C6.H / 2, -hd - C6.WALL_T / 2));
+  bag.add('court.stone', place(bevelBox(THREE, C6.W + C6.WALL_T * 2, C6.H, C6.WALL_T), 0, C6.H / 2, hd + C6.WALL_T / 2));
+  const nicheW = 1.60, nicheH = 2.90, nicheD = 0.42, nicheSill = 0.55;
+  const nichesZ = [];
+  for (let i = 0; i < C6.NICHES; i++) nichesZ.push(-6.0 + i * 3.0);
+  for (const s of [-1, 1]) {
+    const x = s * (hw + C6.WALL_T / 2 + nicheD / 2);
+    // 側牆本體（比前後牆厚，才挖得出壁龕）
+    bag.add('court.stone', place(bevelBox(THREE, C6.WALL_T + nicheD, C6.H, C6.D), x, C6.H / 2, 0));
+    for (const nz of nichesZ) {
+      // 壁龕：後壁 + 上下側收邊，形成真正的凹槽（開口面朝室內）
+      const bx = s * (hw + nicheD);
+      bag.add('wall.paint', place(bevelBox(THREE, 0.05, nicheH, nicheW), bx, nicheSill + nicheH / 2, nz));
+      bag.add('court.stone', place(bevelBox(THREE, nicheD, 0.10, nicheW + 0.24), s * (hw + nicheD / 2), nicheSill - 0.05, nz));
+      bag.add('court.stone', place(bevelBox(THREE, nicheD, 0.14, nicheW + 0.24), s * (hw + nicheD / 2), nicheSill + nicheH + 0.07, nz));
+      bag.add('court.stone', place(bevelBox(THREE, nicheD, nicheH + 0.24, 0.12), s * (hw + nicheD / 2), nicheSill + nicheH / 2, nz - nicheW / 2 - 0.06));
+      bag.add('court.stone', place(bevelBox(THREE, nicheD, nicheH + 0.24, 0.12), s * (hw + nicheD / 2), nicheSill + nicheH / 2, nz + nicheW / 2 + 0.06));
+      bag.add('court.stone', place(bevelBox(THREE, 0.34, 0.12, nicheW + 0.30), s * (hw - 0.10), nicheSill + nicheH + 0.20, nz));  // 龕楣
+    }
+  }
+  // 踢腳板（地板與牆之間絕不直接相交）
+  const cs = (w, x, z, ry) => bag.add('skirting',
+    place(bevelBox(THREE, w, C6.SKIRT_H + 0.02, 0.03), x, (C6.SKIRT_H - 0.02) / 2, z, 0, ry || 0, 0));
+  cs(C6.W, 0, -hd + 0.015); cs(C6.W, 0, hd - 0.015);
+  cs(C6.D, -hw + 0.015, 0, Math.PI / 2); cs(C6.D, hw - 0.015, 0, Math.PI / 2);
+
+  /* ---- 7.3 列柱（每側 6 根，含柱礎與柱頭；有節奏地切出光與影）---- */
+  const colParts = [
+    place(new THREE.CylinderGeometry(0.30, 0.33, C6.H - 0.62, 20), 0, (C6.H - 0.62) / 2 + 0.24, 0),
+    place(bevelBox(THREE, 0.86, 0.24, 0.86), 0, 0.12, 0),
+    place(bevelBox(THREE, 0.74, 0.14, 0.74), 0, 0.31, 0),
+    place(bevelBox(THREE, 0.80, 0.20, 0.80), 0, C6.H - 0.28, 0),
+    place(new THREE.CylinderGeometry(0.40, 0.33, 0.20, 20), 0, C6.H - 0.48, 0),
+  ];
+  const colGeo = mergeGeos(THREE, colParts);
+  const colI = [];
+  for (const s of [-1, 1]) {
+    for (let i = 0; i < C6.COLS; i++) {
+      const z = -6.5 + i * 2.6;
+      colI.push({ p: [s * 4.80, courtH(s * 4.8, z), z] });
+    }
+  }
+  root.add(instanced(ctx, colGeo, 'court.stone', colI));
+  // 柱頂連續楣梁
+  for (const s of [-1, 1]) {
+    bag.add('court.stone', place(bevelBox(THREE, 0.90, 0.34, C6.D - 1.0), s * 4.80, C6.H - 0.13, 0));
+  }
+
+  /* ---- 7.4 天花板：正上方 3 × 3 m 的方形開口，正對被告席 ---- */
+  const zA = C6.DOCK_Z - hs, zB = C6.DOCK_Z + hs;      // 0.5 → 3.5
+  const slabs = [
+    [C6.W, zA - (-hd), 0, (-hd + zA) / 2],
+    [C6.W, hd - zB, 0, (zB + hd) / 2],
+    [hw - hs, C6.SKY_W, -(hs + (hw - hs) / 2), C6.DOCK_Z],
+    [hw - hs, C6.SKY_W, (hs + (hw - hs) / 2), C6.DOCK_Z],
+  ];
+  for (const [w, d, x, z] of slabs) {
+    bag.add('ceiling', place(bevelBox(THREE, w, 0.30, d), x, C6.H + 0.15, z));
+  }
+  // 天光井（開口往上再拉 1.1 m 的石砌井壁，光才會像被「切」出來）
+  const wellH = 1.10;
+  for (const s of [-1, 1]) {
+    bag.add('court.stone', place(bevelBox(THREE, 0.22, wellH, C6.SKY_W + 0.44), s * (hs + 0.11), C6.H + 0.30 + wellH / 2, C6.DOCK_Z));
+    bag.add('court.stone', place(bevelBox(THREE, C6.SKY_W + 0.44, wellH, 0.22), 0, C6.H + 0.30 + wellH / 2, C6.DOCK_Z + s * (hs + 0.11)));
+  }
+  // 開口周圈的石造線腳（讓開口邊緣有 3 cm 的高光邊）
+  for (const s of [-1, 1]) {
+    bag.add('court.stone', place(bevelBox(THREE, 0.16, 0.09, C6.SKY_W + 0.32), s * (hs + 0.08), C6.H - 0.045, C6.DOCK_Z));
+    bag.add('court.stone', place(bevelBox(THREE, C6.SKY_W + 0.32, 0.09, 0.16), 0, C6.H - 0.045, C6.DOCK_Z + s * (hs + 0.08)));
+  }
+  root.userData.skylight = { center: [0, C6.H, C6.DOCK_Z], size: C6.SKY_W };
+
+  /* ---- 7.5 被告席平台：直徑 4.6 m、高 25 cm、側面 6 cm 踢面 ---- */
+  bag.add('court.platform', place(new THREE.CylinderGeometry(C6.DOCK_R - C6.DOCK_TOE, C6.DOCK_R - C6.DOCK_TOE, 0.07, 48),
+    0, 0.035, C6.DOCK_Z));                                                   // 內縮的踢面
+  bag.add('court.platform', place(new THREE.CylinderGeometry(C6.DOCK_R, C6.DOCK_R, C6.DOCK_H - 0.07, 48),
+    0, 0.07 + (C6.DOCK_H - 0.07) / 2, C6.DOCK_Z));                           // 台身
+  bag.add('court.stone', place(new THREE.TorusGeometry(C6.DOCK_R - 0.012, 0.012, 6, 48),
+    0, C6.DOCK_H - 0.008, C6.DOCK_Z, Math.PI / 2, 0, 0));                    // 台緣銅收邊（倒角高光）
+  // 上台的兩階（面向玩家那側）
+  for (let k = 0; k < 2; k++) {
+    bag.add('court.platform', place(bevelBox(THREE, 1.70, C6.DOCK_H / 2, 0.34),
+      0, C6.DOCK_H / 4 + k * (C6.DOCK_H / 2) - C6.DOCK_H / 4 + 0.001,
+      C6.DOCK_Z + C6.DOCK_R + 0.52 - k * 0.34));
+  }
+
+  /* ---- 7.6 檢方席：距被告席 9 m，位於高處（+70 cm）---- */
+  bag.add('court.platform', place(bevelBox(THREE, 5.60, C6.PROS_H, 2.20), 0, C6.PROS_H / 2, C6.PROS_Z));
+  bag.add('court.stone', place(bevelBox(THREE, 5.80, 0.06, 2.40), 0, C6.PROS_H + 0.03, C6.PROS_Z));
+  bag.add('frame.wood', place(bevelBox(THREE, 4.60, 1.10, 0.16), 0, C6.PROS_H + 0.61, C6.PROS_Z + 1.02));   // 檯面前板
+  bag.add('frame.wood', place(bevelBox(THREE, 4.90, 0.09, 0.60), 0, C6.PROS_H + 1.13, C6.PROS_Z + 0.80));   // 桌板
+  for (let k = 0; k < 3; k++) {   // 上檢方席的三階
+    bag.add('court.platform', place(bevelBox(THREE, 2.20, C6.PROS_H / 3, 0.32),
+      0, C6.PROS_H / 6 + k * (C6.PROS_H / 3) - C6.PROS_H / 6 + 0.0005, C6.PROS_Z - 1.10 - 0.32 * (2 - k)));
+  }
+  // 麥克風桿（真實法庭的識別物）
+  for (const mx of [-1.4, 1.4]) {
+    bag.add('track.rail', place(new THREE.CylinderGeometry(0.012, 0.014, 0.34, 8), mx, C6.PROS_H + 1.35, C6.PROS_Z + 0.72, 0.30, 0, 0));
+    bag.add('track.rail', place(new THREE.CylinderGeometry(0.055, 0.055, 0.02, 12), mx, C6.PROS_H + 1.18, C6.PROS_Z + 0.72));
+  }
+
+  /* ---- 7.7 玩家席（距被告席 5.5 m）：一個講台，讓尺度成立 ---- */
+  bag.add('frame.wood', place(bevelBox(THREE, 0.86, 1.12, 0.44), 0, 0.56, C6.PLAYER_Z));
+  bag.add('frame.wood', place(bevelBox(THREE, 0.98, 0.05, 0.56), 0, 1.145, C6.PLAYER_Z, 0.10, 0, 0));
+  bag.add('label.card', place(new THREE.PlaneGeometry(0.30, 0.14), 0, 0.92, C6.PLAYER_Z - 0.225));
+  root.userData.playerStand = [0, 0, C6.PLAYER_Z];
+
+  /* ---- 7.8 只有真實世界才有的雜物：旁聽長椅、證物桌、廳號牌、灑水頭、通風格柵 ---- */
+  for (let k = 0; k < 2; k++) {
+    const z = C6.PLAYER_Z + 1.6 + k * 1.05;
+    if (z > hd - 0.4) break;
+    bag.add('bench.wood', place(bevelBox(THREE, 6.40, 0.06, 0.42), 0, 0.45, z));
+    bag.add('bench.wood', place(bevelBox(THREE, 6.40, 0.50, 0.05), 0, 0.70, z + 0.20));
+    for (const bx of [-2.9, 0, 2.9]) bag.add('bench.wood', place(bevelBox(THREE, 0.08, 0.45, 0.36), bx, 0.225, z));
+  }
+  bag.add('frame.wood', place(bevelBox(THREE, 1.30, 0.05, 0.70), 3.6, 0.78, 0));
+  for (const [ex, ez] of [[3.05, -0.28], [4.15, -0.28], [3.05, 0.28], [4.15, 0.28]]) {
+    bag.add('frame.wood', place(bevelBox(THREE, 0.06, 0.76, 0.06), ex, 0.38, ez));
+  }
+  bag.add('plinth', place(bevelBox(THREE, 0.26, 0.34, 0.014), -1.1, 1.55, hd - 0.02));
+  bag.add('label.card', place(new THREE.PlaneGeometry(0.22, 0.30), -1.1, 1.55, hd - 0.03, 0, Math.PI, 0));
+  for (const [vx, vz] of [[-3.4, -5.2], [3.4, -5.2], [-3.4, 5.2], [3.4, 5.2]]) {
+    bag.add('track.rail', place(bevelBox(THREE, 0.52, 0.05, 0.36), vx, C6.H - 0.025, vz));
+    for (let b = 0; b < 6; b++) {
+      bag.add('track.rail', place(bevelBox(THREE, 0.44, 0.028, 0.032, 0.0008), vx, C6.H - 0.058, vz - 0.14 + b * 0.056, 0.42, 0, 0));
+    }
+  }
+  for (const [sx, sz] of [[-2.6, -2.0], [2.6, -2.0], [-2.6, 6.0], [2.6, 6.0]]) {
+    bag.add('track.rail', place(new THREE.CylinderGeometry(0.015, 0.015, 0.14, 8), sx, C6.H - 0.07, sz));
+    bag.add('track.rail', place(new THREE.CylinderGeometry(0.044, 0.028, 0.016, 10), sx, C6.H - 0.15, sz));
+  }
+
+  const dc = bag.flush(root, { 'skirting': { cast: false }, 'label.card': { cast: false } });
+  DIMENSIONS.court.drawCallEstimate = dc + 2;
+  root.userData.dimensions = DIMENSIONS.court;
+  return root;
+}
+
+/* ==========================================================================
+ * 8. DIMENSIONS —— 每個值都是上面程式碼真的用到的常數（VERIFY.md 逐項對照用）
+ * ========================================================================== */
+
+export const DIMENSIONS = {
+  gallery: {
+    roomSize: [G.W, G.D],                 // 15.0 × 16.0 m
+    ceilingHeight: G.H,                   // 5.4（規格 4.5–6）
+    wallSpan: G.W,                        // 展牆單面 15.0（規格 12–18；側牆 16.0）
+    artCenterHeight: G.ART_CENTER,        // ★ 1.48（鐵律 1.45–1.52）
+    artGap: G.ART_PITCH - G.ART_W,        // 1.40（≥1.2）
+    artSize: [G.ART_W, G.ART_H],
+    artCount: 18,
+    viewingDistance: G.VIEW_DIST,         // 2.60（規格 2–3）
+    doorHeight: G.DOOR_H,                 // 2.70（規格 2.4–3.0）
+    doorWidth: G.DOOR_W,
+    skirtingHeight: G.SKIRT_H,            // 0.10（規格 0.08–0.12）
+    benchSeatHeight: G.BENCH_SEAT,        // 0.45
+    frameThickness: G.FRAME_T,            // 0.035（規格 0.03–0.04，側面看得見）
+    artStandoff: G.STANDOFF,              // 畫離牆 0.035
+    glassAirGap: G.GLASS_GAP,             // 紙與玻璃 0.002
+    labelSize: [0.12, 0.08],              // 展籤 12 × 8 cm
+    floorLineDistance: G.LINE_DIST,       // 警戒線離牆 0.70（規格 0.60–0.80）
+    plank: [G.PLANK_W, 0.90, 1.20],       // 板寬 0.15、長 0.90–1.20，交錯排列
+    floorLevelness: '±3 mm 沉陷，非絕對水平',
+    props: ['展籤', '警戒線', '踢腳板', '通風格柵', '灑水頭', '廳號', '長椅', '滅火器', '銅地釘', '展台', '隔離立柱'],
+    drawCallEstimate: 0,
+  },
+
+  alley: {
+    width: A.W,                           // 3.60（規格 3.2–4.0）
+    wallHeight: A.H,                      // 7.50（規格 6–9，三層樓）
+    length: A.L,                          // 32（規格 25–40）
+    curbHeight: A.CURB_H,                 // 0.14（規格 0.12–0.15）
+    curbWidth: A.CURB_W,                  // 0.15
+    crossfallCrown: A.CROWN,              // 中央拱高 0.033 ≈ 2%
+    deadEnd: true,                        // 盡頭有橫牆與左折轉角
+    parkingArea: { x: 0, z: A.PARK_Z, length: A.PARK_LEN, width: A.W - A.CURB_W * 2 },
+    props: ['冷氣室外機×6', '冷氣排水管×6', '垂直水管×6', '電表箱×4', '鐵窗×4',
+            '鐵捲門', '頭頂電線', '車阻柱', '消防栓', '盆栽台', '明溝'],
+    drawCallEstimate: 0,
+  },
+
+  lot: {
+    size: [L.W, L.D],                     // 44 × 34（規格 ≥ 40×30）
+    stall: [L.STALL_W, L.STALL_L],        // 2.50 × 5.50
+    lineWidth: L.LINE_W,                  // 0.10
+    fenceHeight: L.FENCE_H,               // 2.00（規格 1.8–2.2）
+    lightPoleHeight: L.POLE_H,            // 7.00（規格 6–8），共 4 根
+    lightPoleCount: 4,
+    drainageSlope: L.SLOPE,               // 1.5%（規格 1–2%）
+    cellField: { x: L.CELL.x, z: L.CELL.z, size: L.CELL.size },   // ★ 留給 B6 的 12×12 m 平整鋪面
+    props: ['鑄鐵排水溝柵', '輪擋', '自動繳費機', '車阻柱', '地面導引箭頭', '裂縫雜草'],
+    drawCallEstimate: 0,
+  },
+
+  tunnel: {
+    innerWidth: T.IW,                     // 9.00（規格 8–10）
+    crownHeight: T.CROWN,                 // 6.20（規格 5.5–7）
+    springLine: T.SPRING,                 // 1.70（以下為微弧側牆，以上為 R=4.5 圓拱）
+    archRadius: T.R,
+    profile: '弧形拱頂（ExtrudeGeometry 環形斷面），非方盒',
+    laneWidth: T.LANE, laneCount: T.LANES,        // 單向雙線，每線 3.5 m
+    walkwayWidth: T.WALK_W,               // 0.90（規格 0.75–1.0）
+    walkwayHeight: T.WALK_H,              // 0.15（比車道高 15 cm）
+    grimeBandHeight: T.GRIME_H,           // 側壁下方 1.2 m 防污帶
+    lampSpacing: T.LAMP_SPACING,          // 10 m（規格 8–12），只做燈具外殼
+    nicheSpacing: T.NICHE_SPACING,        // 每 50 m 一個緊急箱
+    segmentLength: T.SEG,                 // ★ 40 m 一段
+    segments: T.SEGS,
+    totalLength: T.SEG * T.SEGS,          // 240 m（規格 200–400 循環）
+    roadCrown: T.CROWNSLOPE,              // 路面橫向拱高 0.035
+    props: ['排煙風機×4', '緊急電話箱×4', '里程樁', '反光導標', '拱頂燈具外殼'],
+    drawCallEstimate: 0,
+  },
+
+  circuit: {
+    width: R5.WIDTH,                      // 14（規格 12–16）
+    cornerCount: 12,                      // 含 2 個髮夾、2 組 S 彎
+    hairpins: 2,
+    sChicanes: 2,
+    straightLength: R5.STRAIGHT,          // 長直線 500 m
+    preStartStraight: R5.PRE_START,       // 起跑線前 460 m（規格 ≥300）
+    kerbWidth: R5.KERB_W,                 // 2.00（規格 1.5–2.5）
+    kerbSteps: R5.KERB_STEPS,             // 3 階
+    kerbStepHeight: R5.KERB_STEP_H,       // 每階 4 cm（規格 3–5 cm）
+    kerbStripe: R5.KERB_TILE,             // 紅白每段 50 cm
+    runoff: R5.RUNOFF,                    // 緩衝區 12 m（規格 5–15）
+    barrierHeight: R5.BARRIER_H,          // 1.15（規格 1.0–1.3）
+    barrierOffset: R5.BARRIER_OFF,        // 距路緣 5 m（規格 3–8）
+    bankAngleDeg: [R5.BANK_MIN, R5.BANK_MAX],   // 彎道傾斜 2–8 度
+    grassBlades: R5.GRASS_COUNT,          // 6000 根 InstancedMesh
+    grassBladeHeight: [0.05, 0.12],       // 每根 5–12 cm 隨機、微彎
+    windPeriodSec: 3.93,                  // onBeforeCompile 注入，主週期 2π/1.60 ≈ 3.93 s
+    elevationRange: 19.5,                 // 全場高低差（規格 15–30）
+    lengthM: 0,                           // buildCircuit() 執行時以 curve.getLength() 填入
+    startU: 0,                            // buildCircuit() 執行時填入
+    props: ['起跑旗門', '輪胎牆×3 處', '計時塔', '廣告板×8', '旗手崗哨×12', '煞車距離牌×9', '發車格'],
+    drawCallEstimate: 0,
+  },
+
+  court: {
+    size: [C6.W, C6.D],                   // 12 × 16
+    ceilingHeight: C6.H,                  // 5.00（規格 4.5–5.5）
+    dockDiameter: C6.DOCK_R * 2,          // 4.60（規格 4–5）
+    dockHeight: C6.DOCK_H,                // 0.25（規格 0.20–0.30）
+    dockToeKick: C6.DOCK_TOE,             // 側面踢面 6 cm（規格 5–8）
+    dockCenter: [0, 0, C6.DOCK_Z],
+    prosecutionZ: C6.PROS_Z,
+    prosecutionDistance: C6.DOCK_Z - C6.PROS_Z,   // 9.0（規格 8–10）
+    prosecutionHeight: C6.PROS_H,         // 0.70（規格 0.60–0.80）
+    playerStand: [0, 0, C6.PLAYER_Z],     // ★ 玩家位置，距被告席 5.5 m（規格 5–6）
+    playerDistance: C6.PLAYER_Z - C6.DOCK_Z,
+    skylight: { center: [0, C6.H, C6.DOCK_Z], size: C6.SKY_W },  // 天花板 3×3 m 開口，正對被告席
+    shadowZoneWidth: C6.SHADOW_W,         // 兩側陰影區各 4.5 m（38 台車由 B8 擺）
+    shadowZoneX: [[-hwC6(), -1.5], [1.5, hwC6()]],
+    columnsPerSide: C6.COLS,              // 每側 6 根列柱
+    nichesPerSide: C6.NICHES,             // 每側 5 個真凹槽壁龕
+    skirtingHeight: C6.SKIRT_H,
+    floorLevelness: '中央 0.3% 微凹（最大 8 mm），非絕對水平',
+    props: ['旁聽長椅×2', '證物桌', '麥克風桿×2', '廳號牌', '通風格柵×4', '灑水頭×4', '講台'],
+    drawCallEstimate: 0,
+  },
+};
+
+function hwC6() { return C6.W / 2; }

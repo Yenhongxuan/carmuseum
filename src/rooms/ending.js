@@ -514,8 +514,8 @@ export function createEnding(ctx) {
       + `<td>${fmtInt(v)} 元</td></tr>`;
     return `<h2>五年，這台車大概要花你多少</h2>
       <table>
-        ${row('成交價（推估）', deal, `原廠建議售價 ${fmtInt(car.price)} 元 × 折讓 ${A.discount * 100}%`)}
-        ${row('五年後殘值（推估）', resale, `假設殘值率 ${A.resid * 100}%`)}
+        ${row('成交價（推估）', deal, `原廠建議售價 ${fmtInt(car.price)} 元 × 折讓 ${(A.discount * 100).toFixed(0)}%`)}
+        ${row('五年後殘值（推估）', resale, `假設殘值率 ${(A.resid * 100).toFixed(0)}%（以原廠建議售價為基準）`)}
         ${row('五年折舊（推估）', depreciation, '成交價 − 殘值')}
         ${row('五年油錢（推估）', fuel, `年跑 ${fmtInt(A.kmPerYear)} 公里 ÷ ${car.kml} km/L × ${A.fuelPrice} 元`)}
         ${row('五年牌照＋燃料稅', tax, `年稅 ${fmtInt(car.tax)} 元 × 5（此欄取自 cars.json，不是推估）`)}

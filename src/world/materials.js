@@ -39,6 +39,14 @@
  *  - aoMap 一律不提供（three r152+ 的 aoMap 讀第二組 UV `uv1`，B1 的幾何不保證有）。
  *    texture(name).aoMap 一律為 null。
  *  - grass.blade 不附 alphaMap（怕 B1 已經用葉片形狀的幾何，再切一次會破圖）。
+ *
+ * 效能備忘：
+ *  - 貼圖總量（37 個全部生成、含 mipmap 估計）約 98 MB，在 120 MB 預算內；
+ *    實際是 lazy 的，單一展廳大約 20–45 MB。用 lib.stats() 看即時值。
+ *  - 烘焙成本（單執行緒 JS，桌機等級）：asphalt 約 1.0 s、floor.oak 約 0.4 s、
+ *    512 級材質各約 0.1–0.3 s、256 級各約 0.03 s；全部烘完約 4 s。
+ *    請在轉場動畫期間先 get() 需要的材質，不要在第一幀才要。
+ *    lib.warmAll() 可一次烘完（灰階檢驗用）。
  */
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -551,7 +559,7 @@ export function createMaterialLibrary(ctx) {
     const low = fbm(4201, 3, 3), peel = fbm(4202, 20, 3);
     const rn = mulberry32(4203);
     const base = hx(0xFAFAF8);
-    const seamPx = 0.002 / tile[1] * S;                 // 2mm 板縫
+    const seamPx = Math.max(1.0, 0.002 / tile[1] * S);  // 2mm 板縫（至少 1 texel）
     for (let y = 0; y < S; y++) {
       const v = y / S;
       const sd = Math.abs(frac(v * (tile[1] / 0.6)) - 0.0);   // 每 60cm 一道

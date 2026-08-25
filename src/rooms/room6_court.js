@@ -559,19 +559,29 @@ export function createRoom(ctx) {
     st.accusations = buildAccusations(d, cars, aliveIdSet(), immune);
   }
 
-  /** 模擬：加上這個立場之後，acc 這條指控會不會消失 */
-  function wouldClear(acc, stanceId) {
+  /**
+   * 模擬：加上這個立場之後，acc 這條指控會變成什麼樣子。
+   * clears  = 這條指控整條消失
+   * weakens = 擋不掉，但還能拿來指控你的對手變少了（誠實標示，不假裝擋掉了）
+   */
+  function simulate(acc, stanceId) {
     const d = byId[st.defendantId];
     const ids = [...takenIds(), stanceId];
     const { immune, dead } = stanceEffects(ids, defs);
-    if (dead.has(d.id)) return false;
+    if (dead.has(d.id)) return { clears: false, weakens: false, metric: acc.metric };
     const base = (STATE.alive && STATE.alive.length) ? STATE.alive : cars.map((c) => c.id);
     const alive = new Set(base.filter((id) => !dead.has(id)));
-    return !buildAccusations(d, cars, alive, immune).some((a) => a.id === acc.id);
+    const after = buildAccusations(d, cars, alive, immune).find((a) => a.id === acc.id);
+    if (!after) return { clears: true, weakens: false, metric: 0 };
+    return {
+      clears: false,
+      weakens: after.metric < acc.metric,
+      metric: after.metric,
+    };
   }
 
   function optionsFor(acc) {
-    if (acc.noOptions) return [];       // ★ 被完全支配：沒有任何選項
+    if (acc.noOptions) return [];       // ★ 被完全支配：沒有任何選項，只能認輸
     const d = byId[st.defendantId];
     const used = new Set(takenIds());
     const alive = aliveIdSet();
@@ -580,11 +590,12 @@ export function createRoom(ctx) {
       if (used.has(s.id)) continue;                       // ★ 用過的立場不再出現
       if (s.predicate(d)) continue;                       // 會把被告自己淘汰
       if (conflictReason(s.id)) continue;                 // ★ 衝突偵測：互斥的立場不給選
-      if (!wouldClear(acc, s.id)) continue;               // 擋不掉這一條就不列出來
+      const sim = simulate(acc, s.id);
+      if (!sim.clears && !sim.weakens) continue;          // 對這條完全沒有作用，就不放上來騙人
       const newDead = s.eliminated.filter((id) => alive.has(id) && id !== d.id).length;
-      cand.push({ def: s, newDead });
+      cand.push({ def: s, newDead, clears: sim.clears, metric: sim.metric });
     }
-    cand.sort((a, b) => a.newDead - b.newDead);
+    cand.sort((a, b) => (b.clears - a.clears) || (a.newDead - b.newDead));
     return cand.slice(0, 3);
   }
 
@@ -808,6 +819,9 @@ export function createRoom(ctx) {
       <button class="b8c-btn" data-stance="${o.def.id}">
         <b>「${esc(o.def.label)}」</b>
         <span class="b8c-cost">代價：現在就淘汰 ${o.newDead} 台（這個立場的完整定義共 ${o.def.count} 台）</span>
+        <span class="b8c-cost">${o.clears
+          ? '效果：這一條指控會被擋下。'
+          : `效果：擋不掉。只是把還能拿這條指控你的對手，從 ${acc.metric} 個壓到 ${o.metric} 個。`}</span>
       </button>`).join('')
       : `<div class="b8c-note">${acc.noOptions
         ? '這一條沒有任何立場可以擋。資料上它每一維都輸，說什麼都是狡辯。'

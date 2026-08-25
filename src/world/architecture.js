@@ -1174,9 +1174,9 @@ export function buildCircuit(ctx) {
     if (am) root.add(am);
   }
   // 遠景大地（填掉緩衝區以外的空洞，並提供明確的視覺底）
-  const far = new THREE.Mesh(new THREE.PlaneGeometry(2400, 2400, 1, 1), ctx.materials.get('soil'));
+  const far = new THREE.Mesh(new THREE.PlaneGeometry(3000, 3000, 1, 1), ctx.materials.get('soil'));
   far.geometry.rotateX(-Math.PI / 2);
-  far.position.set(60, -4.6, -60);
+  far.position.set(60, -5.2, -60);   // 永遠低於緩衝區外緣（-4.6 相對），賽道像坐在一片高地上
   far.receiveShadow = true; far.castShadow = false; far.name = 'circuit.farGround';
   root.add(far);
 

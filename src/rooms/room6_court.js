@@ -664,10 +664,13 @@ export function createRoom(ctx) {
     group.add(fleet.group);
 
     const alive = aliveIdSet();
-    const xs = [-(courtW / 2 - 3.2), -(courtW / 2 - 6.4), (courtW / 2 - 6.4), (courtW / 2 - 3.2)];
+    // ★ 第 3 階段整合修正：原本每側兩列（x 相距 3.2 m），但 yaw=±90° 時車「長」4.4 m 沿 X，
+    //   兩列必然重疊 1.2 m。改為每側一列，並讓 dz 依實際廳深攤開，不再硬鎖 2.6 m 下限
+    //   （車寬 1.8 m，dz ≥ 1.9 即不重疊）。
+    const xs = [-(courtW / 2 - 2.6), (courtW / 2 - 2.6)];
     const perCol = Math.ceil(others.length / xs.length);
     const z0 = -courtD / 2 + 5.5;
-    const dz = Math.max(2.6, (courtD - 11) / Math.max(perCol - 1, 1));
+    const dz = Math.max(1.9, (courtD - 11) / Math.max(perCol - 1, 1));
     others.forEach((id, n) => {
       const col = Math.floor(n / perCol);
       const row = n % perCol;

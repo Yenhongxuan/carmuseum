@@ -607,7 +607,9 @@ export function createRoom(ctx) {
   const handle = {
     key: ROOM_KEY,
     group,
-    spawn: { pos: [0, 1.60, (ROWS - 1) / 2 * GAPZ + 11], yaw: 0 },   // 站在入口，朝 -Z 看進展場
+    // ★ 第 3 階段整合修正：原式算出 z≈22，超出展廳（深 30，z 範圍 -15..15），
+    //   相機會站在前牆外面隔著門洞看。夾進廳內、留 2 m 餘裕。
+    spawn: { pos: [0, 1.60, Math.min((ROWS - 1) / 2 * GAPZ + 11, availZ / 2 - 2)], yaw: 0 },
 
     enter() {
       if (entered) return;

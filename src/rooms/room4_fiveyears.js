@@ -566,7 +566,9 @@ Corolla Cross Hybrid：${ccHy.join('、') || '—'}。HR-V Prestige：${hrvP.joi
   const handle = {
     key: ROOM_KEY,
     group,
-    spawn: { pos: [0, 1.6, 4], yaw: 0 },
+    // ★ 第 3 階段整合修正：B1 的隧道自 z≈0 往 -Z 延伸 240 m，z=+4 其實在洞口外，
+    //   相機正對洞口端面的磁磚，畫面是一片貼圖。移到 z=-8（洞內）。
+    spawn: { pos: [0, 1.6, -8], yaw: 0 },
 
     enter() {
       if (!mounted) { uiRoot.appendChild(dom); mounted = true; }

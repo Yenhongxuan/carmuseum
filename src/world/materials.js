@@ -115,20 +115,19 @@ function worley(seed, cells) {
   return function (u, v) {
     const x = u * C, y = v * C;
     const cx = Math.floor(x), cy = Math.floor(y);
-    let f1 = 1e9, f2 = 1e9, id = 0;
+    let f1 = 1e18, f2 = 1e18, id = 0;
     for (let dy = -1; dy <= 1; dy++) {
       const gy = ((cy + dy) % C + C) % C;
       for (let dx = -1; dx <= 1; dx++) {
         const gx = ((cx + dx) % C + C) % C;
         const k = gy * C + gx;
-        const sx = cx + dx + px[k], sy = cy + dy + py[k];
-        const ddx = x - sx, ddy = y - sy;
-        const d = Math.sqrt(ddx * ddx + ddy * ddy);
-        if (d < f1) { f2 = f1; f1 = d; id = pid[k]; }
-        else if (d < f2) { f2 = d; }
+        const ddx = x - (cx + dx + px[k]), ddy = y - (cy + dy + py[k]);
+        const d2 = ddx * ddx + ddy * ddy;          // 只比平方，最後才 sqrt
+        if (d2 < f1) { f2 = f1; f1 = d2; id = pid[k]; }
+        else if (d2 < f2) { f2 = d2; }
       }
     }
-    out.f1 = f1; out.f2 = f2; out.id = id;
+    out.f1 = Math.sqrt(f1); out.f2 = Math.sqrt(f2); out.id = id;
     return out;
   };
 }
@@ -1459,7 +1458,7 @@ export function createMaterialLibrary(ctx) {
       size: S, tile, A, R, H, AL, heightMM: 3.0, repeat: [8, 4],
       params: {
         roughness: 1.0, metalness: 0.65, color: 0xffffff,
-        transparent: true, alphaTest: 0.45, side: T.DoubleSide, depthWrite: true,
+        transparent: false, alphaTest: 0.45, side: T.DoubleSide, depthWrite: true,
       },
     });
   };
@@ -1821,15 +1820,12 @@ export function createMaterialLibrary(ctx) {
         color: m.color ? m.color.getHex() : null,
         map: ('map' in m) ? (m.map || null) : undefined,
         emissive: m.emissive ? m.emissive.getHex() : null,
-        attenuationColor: m.attenuationColor ? m.attenuationColor.getHex() : null,
-        sheenColor: m.sheenColor ? m.sheenColor.getHex() : null,
       };
       grayBak.set(name, bak);
       if (m.color) m.color.setHex(0x808080);
       if (bak.map !== undefined) m.map = null;
-      if (m.emissive) m.emissive.setHex(0x808080);
-      if (m.attenuationColor) m.attenuationColor.setHex(0x808080);
-      if (m.sheenColor) m.sheenColor.setHex(0x808080);
+      // 只有本來就會發光的（daycell）才轉成中性灰，其餘保持全黑不點亮
+      if (m.emissive && bak.emissive !== 0x000000) m.emissive.setHex(0x808080);
       m.needsUpdate = true;
     } else {
       const bak = grayBak.get(name);
@@ -1837,8 +1833,6 @@ export function createMaterialLibrary(ctx) {
       if (bak.color !== null && m.color) m.color.setHex(bak.color);
       if (bak.map !== undefined) m.map = bak.map;
       if (bak.emissive !== null && m.emissive) m.emissive.setHex(bak.emissive);
-      if (bak.attenuationColor !== null && m.attenuationColor) m.attenuationColor.setHex(bak.attenuationColor);
-      if (bak.sheenColor !== null && m.sheenColor) m.sheenColor.setHex(bak.sheenColor);
       grayBak.delete(name);
       m.needsUpdate = true;
     }

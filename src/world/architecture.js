@@ -1092,6 +1092,11 @@ export function buildCircuit(ctx) {
   /* ---- 6.2 路面（沿 curve 生成，寬 14 m，含 bank）---- */
   function ribbon(matName, latFn, yFn, uvFn, filter) {
     const pos = [], nor = [], uvv = [], idx = [];
+    // 欄位一律由左（負 lateral）到右（正 lateral）排序，確保三角形繞向一致
+    if (latFn[0] > latFn[latFn.length - 1]) {
+      latFn = latFn.slice().reverse(); yFn = yFn.slice().reverse();
+      const inner = uvFn; uvFn = (c, f) => inner(latFn.length - 1 - c, f);
+    }
     const cols = latFn.length;
     const tmp = new THREE.Vector3();
     for (let i = 0; i <= N; i++) {
@@ -1112,6 +1117,14 @@ export function buildCircuit(ctx) {
       }
     }
     if (idx.length === 0) return null;
+    // 依第一個三角形的法線與 up 的夾角決定是否需要翻轉繞向（避免整片背面朝上）
+    {
+      const va = new THREE.Vector3(pos[idx[0] * 3], pos[idx[0] * 3 + 1], pos[idx[0] * 3 + 2]);
+      const vb = new THREE.Vector3(pos[idx[1] * 3], pos[idx[1] * 3 + 1], pos[idx[1] * 3 + 2]);
+      const vc = new THREE.Vector3(pos[idx[2] * 3], pos[idx[2] * 3 + 1], pos[idx[2] * 3 + 2]);
+      const nrm = vb.clone().sub(va).cross(vc.clone().sub(va));
+      if (nrm.y < 0) { for (let k = 0; k < idx.length; k += 3) { const t2 = idx[k + 1]; idx[k + 1] = idx[k + 2]; idx[k + 2] = t2; } }
+    }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
@@ -1152,9 +1165,12 @@ export function buildCircuit(ctx) {
   for (const side of [-1, 1]) {
     const lat = [], hgt = [];
     const seq = side < 0 ? apronSteps.slice().reverse() : apronSteps;
-    for (const L2 of seq) { lat.push(side * (OUT + L2)); hgt.push(L2 >= 70 ? -0.1 : apronDrop(L2)); }
-    if (side < 0) { lat.reverse(); hgt.reverse(); }
-    const am = ribbon('soil', lat, hgt, (c, f) => [(OUT + apronSteps[c]) / 6, f.dist / 6]);
+    for (const L2 of seq) {
+      lat.push(side * (OUT + L2));
+      hgt.push(L2 >= 70 ? (-4.6 - 0.0) : apronDrop(L2));
+    }
+    const uvLat = lat.slice();
+    const am = ribbon('soil', lat, hgt, (c, f) => [uvLat[c] / 6, f.dist / 6]);
     if (am) root.add(am);
   }
   // 遠景大地（填掉緩衝區以外的空洞，並提供明確的視覺底）

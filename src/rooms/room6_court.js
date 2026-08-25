@@ -213,6 +213,7 @@ export function buildAccusations(d, cars, aliveIds, immuneTags = new Set()) {
     const x = doms.sort((a, b) => a.price - b.price)[0];
     push({
       id: 'dominated', type: 'dominated', tags: ['dominated'], cite: x.id, noOptions: true,
+      metric: doms.length,
       title: '被完全支配',
       text: `${carName(x)} 在 ${DIMS.length} 個面向上都不輸你選的這台。`
           + `<strong>你為什麼要選被完全壓過的那台？</strong>`,
@@ -222,12 +223,14 @@ export function buildAccusations(d, cars, aliveIds, immuneTags = new Set()) {
   }
 
   // ── ② 更便宜且不輸
-  const cheaper = rivals
+  const cheaperAll = rivals
     .filter((x) => x.price < d.price && x.safetyCount >= d.safetyCount && x.comfortCount >= d.comfortCount)
-    .sort((a, b) => a.price - b.price)[0];
+    .sort((a, b) => a.price - b.price);
+  const cheaper = cheaperAll[0];
   if (cheaper) {
     push({
       id: 'cheaper', type: 'cheaper', tags: ['price', 'equip'], cite: cheaper.id,
+      metric: cheaperAll.length,
       title: '更便宜且不輸',
       text: `${carName(cheaper)} 便宜 ${wan(d.price - cheaper.price)} 萬，主動安全與內裝配備都不輸你選的這台。`,
       note: `主動安全 ${cheaper.safetyCount} vs ${d.safetyCount} 項、`
@@ -237,14 +240,16 @@ export function buildAccusations(d, cars, aliveIds, immuneTags = new Set()) {
   }
 
   // ── ③ 同價位更好（價差 ±3 萬內、配備總數更多）
-  const samePrice = rivals
+  const samePriceAll = rivals
     .filter((x) => Math.abs(x.price - d.price) <= 30000
       && (x.safetyCount + x.comfortCount) > (d.safetyCount + d.comfortCount))
-    .sort((a, b) => (b.safetyCount + b.comfortCount) - (a.safetyCount + a.comfortCount))[0];
+    .sort((a, b) => (b.safetyCount + b.comfortCount) - (a.safetyCount + a.comfortCount));
+  const samePrice = samePriceAll[0];
   if (samePrice) {
     const gap = (samePrice.safetyCount + samePrice.comfortCount) - (d.safetyCount + d.comfortCount);
     push({
       id: 'samePrice', type: 'samePrice', tags: ['equip'], cite: samePrice.id,
+      metric: samePriceAll.length,
       title: '同價位更好',
       text: `同樣的價錢，${carName(samePrice)} 多給你 ${gap} 項配備。`,
       note: `價差只有 ${fmtInt(Math.abs(samePrice.price - d.price))} 元（門檻 ±30,000）；`
@@ -269,6 +274,7 @@ export function buildAccusations(d, cars, aliveIds, immuneTags = new Set()) {
     if (REVERSE_ITEMS.includes(m.item)) tags.push('reverse');
     push({
       id: `safety:${m.item}`, type: 'missingSafety', tags, cite: null, item: m.item,
+      metric: m.aliveN,
       title: '缺關鍵安全',
       text: `它沒有『${m.item}』。${cars.length} 台裡有 ${m.all} 台有。`
           + `你為什麼不選那 ${m.all} 台之一？`,
@@ -282,7 +288,7 @@ export function buildAccusations(d, cars, aliveIds, immuneTags = new Set()) {
   // ── ⑤ 行李廂無資料（被告自身的資料缺口，與別台無關）
   if (d.cargo == null) {
     push({
-      id: 'cargo', type: 'cargo', tags: ['cargo'], cite: null,
+      id: 'cargo', type: 'cargo', tags: ['cargo'], cite: null, metric: 1,
       title: '行李廂無資料',
       text: `它的行李廂容積<strong>${NO_DATA}</strong>。`
           + `你連放不放得下嬰兒推車都不知道，就要買了？`,
@@ -293,13 +299,15 @@ export function buildAccusations(d, cars, aliveIds, immuneTags = new Set()) {
   }
 
   // ── ⑥ 保固短（引用全場保固最好的那台，一樣是算出來的）
-  const best = rivals
+  const betterWarranty = rivals
     .filter((x) => WARRANTY_SCORE[x.warranty] > WARRANTY_SCORE[d.warranty])
     .sort((a, b) => WARRANTY_SCORE[b.warranty] - WARRANTY_SCORE[a.warranty]
-      || a.price - b.price)[0];
+      || a.price - b.price);
+  const best = betterWarranty[0];
   if (best) {
     push({
       id: 'warranty', type: 'warranty', tags: ['warranty'], cite: best.id,
+      metric: betterWarranty.length,
       title: '保固短',
       text: `保固只有 ${warrantyText(d.warranty)}。${best.brand} ${best.model} 是 ${warrantyText(best.warranty)}。`
           + `第 37 個月出問題，你自己付。`,
@@ -309,12 +317,14 @@ export function buildAccusations(d, cars, aliveIds, immuneTags = new Set()) {
   }
 
   // ── ⑦ 稅金高（只在 tax === 17440 時出現）
-  const cheapTax = rivals.filter((x) => x.tax < d.tax)
+  const cheaperTaxAll = rivals.filter((x) => x.tax < d.tax)
     .sort((a, b) => a.tax - b.tax
-      || WARRANTY_SCORE[b.warranty] - WARRANTY_SCORE[a.warranty])[0];
+      || WARRANTY_SCORE[b.warranty] - WARRANTY_SCORE[a.warranty]);
+  const cheapTax = cheaperTaxAll[0];
   if (d.tax === 17440 && cheapTax) {
     push({
       id: 'tax', type: 'tax', tags: ['tax'], cite: cheapTax.id,
+      metric: cheaperTaxAll.length,
       title: '稅金高',
       text: `年稅 ${fmtInt(d.tax)}，五年 ${wan(d.tax * 5)} 萬。`
           + `${cheapTax.model} 只要 ${fmtInt(cheapTax.tax)}，五年差 ${wan((d.tax - cheapTax.tax) * 5)} 萬。`,
@@ -327,6 +337,7 @@ export function buildAccusations(d, cars, aliveIds, immuneTags = new Set()) {
   if (d.dealer === '少' && betterDealer.length) {
     push({
       id: 'dealer', type: 'dealer', tags: ['dealer'], cite: null,
+      metric: betterDealer.length,
       title: '據點少',
       text: `${d.brand} 的據點是全場最少的一群。保養那天你要多開 25 分鐘。`,
       note: `全場 ${cars.filter((c) => c.dealer === '少').length} 台是「少」；`
@@ -336,13 +347,15 @@ export function buildAccusations(d, cars, aliveIds, immuneTags = new Set()) {
   }
 
   // ── ⑨ 油耗（★ 這一條不是任務給的八個模板之一，是本檔新增，見檔頭 U2）
-  const thirsty = rivals.filter((x) => x.kml - d.kml >= 3)
-    .sort((a, b) => b.kml - a.kml)[0];
+  const thirstyAll = rivals.filter((x) => x.kml - d.kml >= 3)
+    .sort((a, b) => b.kml - a.kml);
+  const thirsty = thirstyAll[0];
   if (thirsty) {
     const KM_PER_YEAR = 12000;
     const litreGap = Math.round((KM_PER_YEAR / d.kml - KM_PER_YEAR / thirsty.kml) * 5);
     push({
       id: 'fuel', type: 'fuel', tags: ['fuel'], cite: thirsty.id,
+      metric: thirstyAll.length,
       title: '油耗差',
       text: `${carName(thirsty)} 每公升多跑 ${(thirsty.kml - d.kml).toFixed(1)} 公里`
           + `（${thirsty.kml} vs ${d.kml} km/L）。年跑 ${fmtInt(KM_PER_YEAR)} 公里的話，`

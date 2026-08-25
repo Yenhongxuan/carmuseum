@@ -263,3 +263,166 @@ function makeMoteSprite(THREE) {
   tex.needsUpdate = true;
   return tex;
 }
+
+/* ──────────────────── IBL：六種環境的程序生成 envScene ────────────────────
+ * 為什麼 IBL 最重要：白牆、白車、白地板若沒有環境反射，會全部長得一模一樣。
+ * IBL 讓每個表面依它「看到的環境」反射不同的顏色與亮度 —— 車頂反射天空的藍、
+ * 車底反射地面的暖灰，白色場景的立體感才出得來。
+ * 做法：組一個小 THREE.Scene，放幾個「發光面」（MeshBasicMaterial，顏色可 > 1 當作 HDR），
+ *       餵給 PMREMGenerator.fromScene()。每個 kind 只生成一次（見 _envCache）。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** 一片發光面（環境場景專用，不是場景表面材質） */
+function envPanel(THREE, own, opts) {
+  const {
+    w = 1, h = 1, d = 0.02, pos = [0, 0, 0], rot = [0, 0, 0],
+    color = '#ffffff', intensity = 1,
+  } = opts;
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const mat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(color).multiplyScalar(intensity),
+    toneMapped: false,
+  });
+  own.geo.push(geo); own.mat.push(mat);
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(pos[0], pos[1], pos[2]);
+  m.rotation.set(rot[0], rot[1], rot[2]);
+  return m;
+}
+
+/** 一個內面發光的盒子（室內環境的底色） */
+function envBox(THREE, own, w, h, d, color, intensity) {
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const mat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(color).multiplyScalar(intensity),
+    side: THREE.BackSide,
+    toneMapped: false,
+  });
+  own.geo.push(geo); own.mat.push(mat);
+  return new THREE.Mesh(geo, mat);
+}
+
+/**
+ * 戶外天空穹頂：天頂藍 → 地平線淺 → 地面暖灰的連續漸層（用逐頂點色，不需要任何貼圖）。
+ * 再加一顆小太陽球給金屬與清漆一個明確的高光點。
+ */
+function envSkyDome(THREE, own, o) {
+  const {
+    zenith = '#5E8FC7', horizon = '#DCE6F0', ground = '#8A8578',
+    zenithI = 1.2, horizonI = 1.9, groundI = 0.62,
+    sunDir = [-0.55, 0.42, 0.72], sunColor = '#FFF3E2', sunI = 16, sunSize = 2.6,
+  } = o;
+  const R = 60;
+  const geo = new THREE.SphereGeometry(R, 40, 24);
+  const pos = geo.attributes.position;
+  const cz = new THREE.Color(zenith).multiplyScalar(zenithI);
+  const ch = new THREE.Color(horizon).multiplyScalar(horizonI);
+  const cg = new THREE.Color(ground).multiplyScalar(groundI);
+  const arr = new Float32Array(pos.count * 3);
+  const tmp = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i) / R;
+    if (y >= 0) tmp.copy(ch).lerp(cz, smoothstep(y * 1.35));
+    else tmp.copy(ch).lerp(cg, smoothstep(-y * 3.0));   // 地平線下很快收斂成地面暖灰
+    arr[i * 3] = tmp.r; arr[i * 3 + 1] = tmp.g; arr[i * 3 + 2] = tmp.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true, side: THREE.BackSide, toneMapped: false,
+  });
+  own.geo.push(geo); own.mat.push(mat);
+  const dome = new THREE.Mesh(geo, mat);
+
+  const sgeo = new THREE.SphereGeometry(sunSize, 16, 12);
+  const smat = new THREE.MeshBasicMaterial({
+    color: new THREE.Color(sunColor).multiplyScalar(sunI), toneMapped: false,
+  });
+  own.geo.push(sgeo); own.mat.push(smat);
+  const sun = new THREE.Mesh(sgeo, smat);
+  const dir = new THREE.Vector3(sunDir[0], sunDir[1], sunDir[2]).normalize().multiplyScalar(R * 0.82);
+  sun.position.copy(dir);
+
+  const s = new THREE.Scene();
+  s.add(dome); s.add(sun);
+  return s;
+}
+
+/** gallery 的自建備援（RoomEnvironment 載入失敗時用）：白盒 + 高側窗亮帶 */
+function envGalleryFallback(THREE, own) {
+  const s = new THREE.Scene();
+  s.add(envBox(THREE, own, 16, 6.2, 22, '#F2F3F5', 0.62));
+  // 高側窗：+X 牆上緣一整條亮帶（冷白）
+  s.add(envPanel(THREE, own, {
+    w: 0.05, h: 0.95, d: 18, pos: [7.7, 2.15, 0], color: '#DCE8FA', intensity: 5.2,
+  }));
+  // 對牆的反射帶（被窗光打亮的白牆下半部）
+  s.add(envPanel(THREE, own, {
+    w: 0.05, h: 1.6, d: 18, pos: [-7.7, -0.9, 0], color: '#FFFFFF', intensity: 1.35,
+  }));
+  // 天花板洗牆的漫射面
+  s.add(envPanel(THREE, own, {
+    w: 13, h: 0.05, d: 19, pos: [0, 2.95, 0], color: '#FFFFFF', intensity: 1.05,
+  }));
+  // 橡木地板的暖反射
+  s.add(envPanel(THREE, own, {
+    w: 14, h: 0.05, d: 20, pos: [0, -2.95, 0], color: '#D9C7A8', intensity: 0.55,
+  }));
+  return s;
+}
+
+/** alley：上方一條窄天空帶，兩側灰水泥（模擬被牆夾住） */
+function envAlley(THREE, own) {
+  const s = new THREE.Scene();
+  s.add(envBox(THREE, own, 3.4, 8, 30, '#9A9DA0', 0.30));      // 兩側水泥的整體底色
+  s.add(envPanel(THREE, own, {                                  // 頭頂那條窄天空
+    w: 2.2, h: 0.05, d: 28, pos: [0, 3.9, 0], color: '#BCD6F0', intensity: 4.4,
+  }));
+  s.add(envPanel(THREE, own, {                                  // 被日光打到的一側牆上半部
+    w: 0.05, h: 3.2, d: 28, pos: [1.65, 1.9, 0], color: '#C4C0B8', intensity: 1.15,
+  }));
+  s.add(envPanel(THREE, own, {                                  // 背光側牆（灰、暗但不黑）
+    w: 0.05, h: 3.2, d: 28, pos: [-1.65, 1.4, 0], color: '#8E9296', intensity: 0.42,
+  }));
+  s.add(envPanel(THREE, own, {                                  // 柏油地面的回彈
+    w: 3.2, h: 0.05, d: 28, pos: [0, -3.9, 0], color: '#7E7A74', intensity: 0.34,
+  }));
+  return s;
+}
+
+/** tunnel：橘黃色的低亮度環境（隧道燈的總和） + 遠處一個冷色的洞口 */
+function envTunnel(THREE, own) {
+  const s = new THREE.Scene();
+  s.add(envBox(THREE, own, 9, 5.6, 40, '#8C7358', 0.30));       // 髒磁磚的整體橘褐
+  s.add(envPanel(THREE, own, {                                  // 拱頂的一排橘黃燈（連續化）
+    w: 2.4, h: 0.05, d: 34, pos: [0, 2.55, 0], color: '#FFB760', intensity: 3.1,
+  }));
+  s.add(envPanel(THREE, own, {                                  // 兩側壁面被燈打亮的帶
+    w: 0.05, h: 1.5, d: 34, pos: [4.3, 1.3, 0], color: '#E8B683', intensity: 0.85,
+  }));
+  s.add(envPanel(THREE, own, {
+    w: 0.05, h: 1.5, d: 34, pos: [-4.3, 1.3, 0], color: '#E8B683', intensity: 0.85,
+  }));
+  s.add(envPanel(THREE, own, {                                  // 路面回彈
+    w: 8, h: 0.05, d: 34, pos: [0, -2.7, 0], color: '#8A7E72', intensity: 0.36,
+  }));
+  s.add(envPanel(THREE, own, {                                  // ★ 遠處的洞口日光（冷 5500K）
+    w: 7, h: 4.4, d: 0.05, pos: [0, 0.2, -19.6], color: '#DDEAF8', intensity: 7.5,
+  }));
+  return s;
+}
+
+/** court：室內，上方一個亮方塊（天窗），四周偏暗的藍灰（但仍是明亮的灰藍，不做成黑） */
+function envCourt(THREE, own) {
+  const s = new THREE.Scene();
+  s.add(envBox(THREE, own, 14, 7, 16, '#C8D0DC', 0.34));        // ★ 陰影區的灰藍 #C8D0DC
+  s.add(envPanel(THREE, own, {                                  // 3×3 m 天窗
+    w: 3, h: 0.05, d: 3, pos: [0, 3.35, 0], color: '#FFFFFF', intensity: 9.0,
+  }));
+  s.add(envPanel(THREE, own, {                                  // 天窗周圍被漏光染亮的天花
+    w: 7, h: 0.05, d: 7, pos: [0, 3.3, 0], color: '#E7EDF6', intensity: 0.9,
+  }));
+  s.add(envPanel(THREE, own, {                                  // 石材地面的回彈（略暖）
+    w: 12, h: 0.05, d: 14, pos: [0, -3.4, 0], color: '#B9B4AC', intensity: 0.40,
+  }));
+  return s;
+}

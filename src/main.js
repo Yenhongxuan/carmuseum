@@ -60,7 +60,7 @@ const hdrRT = new THREE.WebGLRenderTarget(1, 1, {
 const postMaterial = new THREE.ShaderMaterial({
   uniforms: {
     tDiffuse: { value: null }, uRes: { value: new THREE.Vector2(1, 1) },
-    uExposure: { value: 1.0 }, uVignette: { value: 0.22 },
+    uExposure: { value: 1.0 }, uVignette: { value: 0.10 },   // 四角壓暗 10%（規格 8–12%），在顯示空間量
     uCA: { value: 0.00075 }, uGrain: { value: 0.022 }, uTime: { value: 0 },
   },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
@@ -86,10 +86,13 @@ const postMaterial = new THREE.ShaderMaterial({
       vec3 col = vec3(texture2D(tDiffuse, uv + off).r,
                       texture2D(tDiffuse, uv).g,
                       texture2D(tDiffuse, uv - off).b);
-      // ② 暈影：線性空間，邊緣壓暗 ~10%
-      col *= 1.0 - uVignette * smoothstep(0.10, 0.75, r2);
-      // ③ ACES + sRGB
+      // ② ACES + sRGB
       col = linearToSRGB(ACESFilmic(col));
+      // ③ 暈影：★ 必須在 tone mapping 之後。
+      //    放在線性空間時，ACES 在高亮區是壓縮的，線性 10% 到畫面上只剩 ~2%（實測）。
+      //    規格的「邊緣壓暗 8–12%」是畫面上的量，所以在顯示空間乘。
+      //    smoothstep 上界取 0.50（= 四角的 r2），讓四角剛好吃滿 uVignette。
+      col *= 1.0 - uVignette * smoothstep(0.05, 0.50, r2);
       // ④ 底片顆粒：顯示空間，暗部略強（真實底片的樣子）
       float g = hash(gl_FragCoord.xy + fract(uTime) * 512.0) - 0.5;
       float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));

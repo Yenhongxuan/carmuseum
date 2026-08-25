@@ -924,3 +924,935 @@ class FrameSet {
   }
   dispose() { this.canvases.length = 0; }
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 6. 第一層｜Spin360 檢視器（本次無素材，仍完整實作）
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const IDLE_DELAY_MS = 8000;    // ★ 細節 4：8 秒沒互動就開始自動慢轉
+const IDLE_STEP_MS = 3000;     //            每 3 秒轉一格
+
+class Spin360 {
+  constructor(frames) {
+    this.frames = frames;      // string[]（規格指定的欄位名）
+    this.index = 0;
+    this.dragging = false;
+  }
+
+  /** ★ 規格指定的拖曳換格公式，逐字實作 */
+  onDrag(dx, viewportWidth) {
+    const step = viewportWidth / this.frames.length;
+    this.index = (this.index + Math.round(dx / step)) % this.frames.length;
+    if (this.index < 0) this.index += this.frames.length;
+    this.show(this.index);
+  }
+
+  show(i) {
+    this.index = ((i % this.frames.length) + this.frames.length) % this.frames.length;
+    this._paint();
+  }
+}
+
+/**
+ * 建立一個可用的 Spin360（DOM + canvas + 可選的 3D 佈告板）。
+ * 回傳物件同時滿足規格的 class 形狀（frames / index / dragging / onDrag / show）。
+ */
+function makeSpin360(THREE, frames, el, hooks = {}) {
+  const s = new Spin360(frames);
+  s.THREE = THREE;
+  s.set = new FrameSet(frames);
+  s.el = el || null;
+  s.enabled = false;
+  s.disposed = false;
+  s._f = 0;                 // 浮點格位（慣性用）
+  s._pending = 0;           // 未滿一格的拖曳殘量
+  s._lastInteract = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  s._idleAcc = 0;
+  s._anim = null;           // {from,to,t,dur}
+  s._vel = 0;               // 格/秒
+  s._tex = null;
+  s.object3D = null;
+  s.tierNote = hooks.tierNote || '';
+
+  /* ── DOM ── */
+  if (el && typeof document !== 'undefined') {
+    ensureSkeletonStyle();
+    const wrap = document.createElement('div');
+    wrap.className = 'b4-spin-wrap';
+    const cv = document.createElement('canvas');
+    cv.className = 'b4-spin-canvas';
+    wrap.appendChild(cv);
+    // ★ 細節 1：骨架屏（灰色佔位方塊 + 極慢呼吸），不是 spinner
+    const skel = document.createElement('div');
+    skel.className = 'b4-skel';
+    const sb = document.createElement('div');
+    sb.className = 'b4-skel-b';
+    sb.style.cssText = 'left:18%;right:18%;bottom:12%;height:7%;';
+    skel.appendChild(sb);
+    wrap.appendChild(skel);
+    el.appendChild(wrap);
+    s.wrap = wrap; s.canvas = cv; s.skel = skel;
+    s.ctx2d = cv.getContext('2d');
+  }
+
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+  s._resize = () => {
+    if (!s.canvas || !s.wrap) return;
+    const dpr = Math.min(typeof devicePixelRatio !== 'undefined' ? devicePixelRatio : 1, 2);
+    const w = Math.max(1, s.wrap.clientWidth || 640), h = Math.max(1, s.wrap.clientHeight || 400);
+    if (s.canvas.width !== Math.round(w * dpr) || s.canvas.height !== Math.round(h * dpr)) {
+      s.canvas.width = Math.round(w * dpr); s.canvas.height = Math.round(h * dpr);
+    }
+    s._cssW = w; s._cssH = h;
+  };
+
+  s._paint = () => {
+    if (!s.ctx2d || s.disposed) return;
+    s._resize();
+    const c = s.ctx2d, W = s.canvas.width, H = s.canvas.height;
+    c.clearRect(0, 0, W, H);
+    const angle = (s.index / Math.max(1, s.frames.length)) * Math.PI * 2;
+    // ★ 細節 3：落地陰影先畫，形狀隨角度改變
+    drawGroundShadow(c, W, H, angle, 1);
+    const src = s.set.canvases[s.index];
+    if (src) {
+      const sw = src.width, sh = src.height;
+      const k = Math.min((W * 0.92) / sw, (H * 0.80) / sh);
+      const dw = sw * k, dh = sh * k;
+      c.drawImage(src, (W - dw) / 2, H * 0.78 - dh * 0.92, dw, dh);
+    }
+    if (s._tex) s._tex.needsUpdate = true;
+  };
+
+  /* ── 預載入 ── */
+  s.load = async () => {
+    const ok = await s.set.preload();
+    if (s.disposed) return false;
+    if (s.skel && s.skel.parentNode) s.skel.parentNode.removeChild(s.skel);
+    s.enabled = ok;
+    if (ok) s._paint();
+    return ok;
+  };
+
+  /* ── 指標互動（拖曳 + ★ 細節 5：慣性） ── */
+  if (s.wrap) {
+    let lastX = 0, lastT = 0;
+    const down = (e) => {
+      if (!s.enabled) return;
+      s.dragging = true; s._anim = null; s._vel = 0;
+      s._pending = 0; lastX = e.clientX; lastT = now();
+      s._lastInteract = lastT; s._idleAcc = 0;
+      s.wrap.classList.add('b4-drag');
+      if (s.wrap.setPointerCapture && e.pointerId !== undefined) {
+        try { s.wrap.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+      }
+    };
+    const move = (e) => {
+      if (!s.dragging) return;
+      const t = now(), dx = e.clientX - lastX, dt = Math.max(t - lastT, 1);
+      lastX = e.clientX; lastT = t;
+      s._lastInteract = t;
+      const vw = s._cssW || s.wrap.clientWidth || 640;
+      const step = vw / s.frames.length;
+      s._pending += dx;
+      if (Math.abs(s._pending) >= step) {
+        const k = Math.trunc(s._pending / step);
+        s.onDrag(k * step, vw);        // 保證 Math.round(dx/step) === k
+        s._pending -= k * step;
+        s._f = s.index;
+      }
+      s._vel = (dx / step) / (dt / 1000);
+    };
+    const up = () => {
+      if (!s.dragging) return;
+      s.dragging = false;
+      s.wrap.classList.remove('b4-drag');
+      s._lastInteract = now();
+      // 放開後繼續轉一小段再減速停下（自訂 cubic-bezier，禁用 linear）
+      const v = clamp(s._vel, -34, 34);
+      if (Math.abs(v) > 1.2) {
+        const travel = v * 0.42;
+        s._f = s.index;
+        s._anim = { from: s._f, to: s._f + travel, t: 0, dur: clamp(0.28 + Math.abs(travel) * 0.055, 0.35, 1.5) };
+      }
+      s._vel = 0;
+    };
+    s.wrap.addEventListener('pointerdown', down);
+    s.wrap.addEventListener('pointermove', move);
+    s.wrap.addEventListener('pointerup', up);
+    s.wrap.addEventListener('pointercancel', up);
+    s.wrap.addEventListener('pointerleave', up);
+    s._handlers = { down, move, up };
+  }
+
+  /* ── ★ 細節 6：3D 場景整合（永遠面向相機的 Plane，並乘上環境光顏色） ── */
+  s.attach3D = (opts = {}) => {
+    if (!s.canvas || !THREE) return null;
+    const tex = new THREE.CanvasTexture(s.canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;             // Albedo 必須手動設（r185）
+    tex.anisotropy = opts.anisotropy || 4;
+    s._tex = tex;
+    // 基底材質一律來自 ctx.materials（此處以 car.shadow 這張純 Albedo 材質做 clone），
+    // 不自己 new Material。
+    const mat = opts.baseMaterial.clone();
+    mat.map = tex;
+    mat.transparent = true;
+    mat.depthWrite = false;
+    if ('roughnessMap' in mat) { mat.roughnessMap = null; mat.normalMap = null; }
+    const w = opts.width || 4.4, h = opts.height || 4.4 * (s.canvas.height / Math.max(1, s.canvas.width));
+    const geo = new THREE.PlaneGeometry(w, h);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.y = h / 2;
+    mesh.userData.b4Billboard = true;
+    const g = new THREE.Group();
+    g.add(mesh);
+    s.object3D = g; s._plane = mesh; s._mat = mat; s._geo = geo;
+    s._baseColor = mat.color ? mat.color.clone() : null;
+    return g;
+  };
+
+  /** 每幀更新：閒置慢轉 / 慣性 / 佈告板面向相機 / 光照色調 */
+  s.update = (dt, elapsed, camera, tint) => {
+    if (s.disposed) return;
+    // 慣性
+    if (s._anim) {
+      s._anim.t += dt;
+      const p = clamp(s._anim.t / s._anim.dur, 0, 1);
+      const e = EASE_COMPONENT_FN(p);
+      const f = lerp(s._anim.from, s._anim.to, e);
+      const i = Math.round(f);
+      if (i !== s.index) s.show(i);
+      s._f = f;
+      if (p >= 1) s._anim = null;
+    } else if (s.enabled && !s.dragging) {
+      // 閒置慢轉：8 秒沒互動後每 3 秒一格；使用者一碰就停（down/move 會更新 _lastInteract）
+      const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      if (t - s._lastInteract > IDLE_DELAY_MS) {
+        s._idleAcc += dt * 1000;
+        if (s._idleAcc >= IDLE_STEP_MS) { s._idleAcc = 0; s.show(s.index + 1); s._f = s.index; }
+      } else s._idleAcc = 0;
+    }
+    // 佈告板
+    if (s._plane && camera) {
+      s._plane.quaternion.copy(camera.quaternion);
+      if (tint && s._mat && s._mat.color && s._baseColor) {
+        s._mat.color.copy(s._baseColor).multiply(tint);
+      }
+    }
+  };
+
+  s.dispose = () => {
+    if (s.disposed) return;
+    s.disposed = true;
+    if (s.wrap && s._handlers) {
+      s.wrap.removeEventListener('pointerdown', s._handlers.down);
+      s.wrap.removeEventListener('pointermove', s._handlers.move);
+      s.wrap.removeEventListener('pointerup', s._handlers.up);
+      s.wrap.removeEventListener('pointercancel', s._handlers.up);
+      s.wrap.removeEventListener('pointerleave', s._handlers.up);
+    }
+    if (s.wrap && s.wrap.parentNode) s.wrap.parentNode.removeChild(s.wrap);
+    if (s._tex) s._tex.dispose();
+    if (s._geo) s._geo.dispose();
+    if (s._mat) s._mat.dispose();
+    s.set.dispose();
+  };
+
+  return s;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 7. 第二層｜角度切換器（3–7 張，0.25 秒交叉淡入）
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+function makeAngleSwitcher(THREE, images, el, hooks = {}) {
+  const a = {
+    frames: images.slice(), index: 0, dragging: false, disposed: false,
+    set: new FrameSet(images), enabled: false, labels: hooks.labels || null,
+  };
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  a._fade = null;   // { from, to, t, dur }
+
+  if (el && typeof document !== 'undefined') {
+    ensureSkeletonStyle();
+    const wrap = document.createElement('div');
+    wrap.className = 'b4-spin-wrap';
+    const cv = document.createElement('canvas');
+    cv.className = 'b4-spin-canvas';
+    wrap.appendChild(cv);
+    const skel = document.createElement('div');
+    skel.className = 'b4-skel';
+    wrap.appendChild(skel);
+    const bar = document.createElement('div');
+    bar.className = 'b4-angles';
+    wrap.appendChild(bar);
+    el.appendChild(wrap);
+    a.wrap = wrap; a.canvas = cv; a.skel = skel; a.bar = bar;
+    a.ctx2d = cv.getContext('2d');
+  }
+
+  a._resize = () => {
+    if (!a.canvas || !a.wrap) return;
+    const dpr = Math.min(typeof devicePixelRatio !== 'undefined' ? devicePixelRatio : 1, 2);
+    const w = Math.max(1, a.wrap.clientWidth || 640), h = Math.max(1, a.wrap.clientHeight || 400);
+    a.canvas.width = Math.round(w * dpr); a.canvas.height = Math.round(h * dpr);
+    a._cssW = w;
+  };
+
+  const drawFrame = (c, i, alpha, W, H) => {
+    const src = a.set.canvases[i];
+    if (!src) return;
+    c.save();
+    c.globalAlpha = alpha;
+    const k = Math.min((W * 0.92) / src.width, (H * 0.80) / src.height);
+    const dw = src.width * k, dh = src.height * k;
+    c.drawImage(src, (W - dw) / 2, H * 0.78 - dh * 0.92, dw, dh);
+    c.restore();
+  };
+
+  a._paint = () => {
+    if (!a.ctx2d || a.disposed) return;
+    const c = a.ctx2d, W = a.canvas.width, H = a.canvas.height;
+    c.clearRect(0, 0, W, H);
+    const ang = (i) => (i / Math.max(1, a.frames.length)) * Math.PI * 2;
+    if (a._fade) {
+      const p = clamp(a._fade.t / a._fade.dur, 0, 1);
+      const e = EASE_MICRO_FN(p);
+      drawGroundShadow(c, W, H, lerp(ang(a._fade.from), ang(a._fade.to), e), 1);
+      drawFrame(c, a._fade.from, 1 - e, W, H);
+      drawFrame(c, a._fade.to, e, W, H);
+    } else {
+      drawGroundShadow(c, W, H, ang(a.index), 1);
+      drawFrame(c, a.index, 1, W, H);
+    }
+    if (a._tex) a._tex.needsUpdate = true;
+  };
+
+  /** 每次切換 0.25 秒交叉淡入 */
+  a.show = (i) => {
+    const n = a.frames.length;
+    const t = ((i % n) + n) % n;
+    if (t === a.index && !a._fade) { a._paint(); return; }
+    a._fade = { from: a.index, to: t, t: 0, dur: 0.25 };
+    a.index = t;
+    if (a.bar) [...a.bar.children].forEach((b, k) => b.setAttribute('aria-pressed', String(k === t)));
+  };
+
+  a.load = async () => {
+    const ok = await a.set.preload();
+    if (a.disposed) return false;
+    if (a.skel && a.skel.parentNode) a.skel.parentNode.removeChild(a.skel);
+    a.enabled = ok;
+    if (ok && a.bar) {
+      a.frames.forEach((_, i) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = (a.labels && a.labels[i]) || `角度 ${i + 1}`;
+        b.setAttribute('aria-pressed', String(i === a.index));
+        b.addEventListener('click', () => a.show(i));
+        a.bar.appendChild(b);
+      });
+    }
+    a._resize();
+    if (ok) a._paint();
+    return ok;
+  };
+
+  // 拖曳也可切換
+  if (a.wrap) {
+    let x0 = 0;
+    const down = (e) => { if (!a.enabled) return; a.dragging = true; x0 = e.clientX; };
+    const move = (e) => {
+      if (!a.dragging) return;
+      const step = (a._cssW || 640) / (a.frames.length * 1.6);
+      const dx = e.clientX - x0;
+      if (Math.abs(dx) >= step) { a.show(a.index + (dx > 0 ? 1 : -1)); x0 = e.clientX; }
+    };
+    const up = () => { a.dragging = false; };
+    a.wrap.addEventListener('pointerdown', down);
+    a.wrap.addEventListener('pointermove', move);
+    a.wrap.addEventListener('pointerup', up);
+    a.wrap.addEventListener('pointerleave', up);
+    a._handlers = { down, move, up };
+  }
+
+  a.attach3D = (opts = {}) => {
+    if (!a.canvas || !THREE) return null;
+    const tex = new THREE.CanvasTexture(a.canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    a._tex = tex;
+    const mat = opts.baseMaterial.clone();
+    mat.map = tex; mat.transparent = true; mat.depthWrite = false;
+    const w = opts.width || 4.4, h = opts.height || 4.4 * (a.canvas.height / Math.max(1, a.canvas.width));
+    const geo = new THREE.PlaneGeometry(w, h);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.y = h / 2;
+    const g = new THREE.Group(); g.add(mesh);
+    a.object3D = g; a._plane = mesh; a._mat = mat; a._geo = geo;
+    a._baseColor = mat.color ? mat.color.clone() : null;
+    return g;
+  };
+
+  a.update = (dt, elapsed, camera, tint) => {
+    if (a.disposed) return;
+    if (a._fade) {
+      a._fade.t += dt;
+      a._paint();
+      if (a._fade.t >= a._fade.dur) { a._fade = null; a._paint(); }
+    }
+    if (a._plane && camera) {
+      a._plane.quaternion.copy(camera.quaternion);
+      if (tint && a._mat && a._mat.color && a._baseColor) a._mat.color.copy(a._baseColor).multiply(tint);
+    }
+  };
+
+  a.dispose = () => {
+    if (a.disposed) return;
+    a.disposed = true;
+    if (a.wrap && a._handlers) {
+      a.wrap.removeEventListener('pointerdown', a._handlers.down);
+      a.wrap.removeEventListener('pointermove', a._handlers.move);
+      a.wrap.removeEventListener('pointerup', a._handlers.up);
+      a.wrap.removeEventListener('pointerleave', a._handlers.up);
+    }
+    if (a.wrap && a.wrap.parentNode) a.wrap.parentNode.removeChild(a.wrap);
+    if (a._tex) a._tex.dispose();
+    if (a._geo) a._geo.dispose();
+    if (a._mat) a._mat.dispose();
+    a.set.dispose();
+  };
+
+  return a;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 8. Fleet｜39 台同場（依車頂線分 3 類，每類 車身/車窗/輪胎/輪圈 各一個 InstancedMesh）
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Fleet 車身把 paint/trim/lamp/stripe 併成一個 IM，用頂點色區分零件 */
+const VC = {
+  paint: [1.00, 1.00, 1.00],
+  trim: [0.150, 0.158, 0.170],
+  lamp: [0.880, 0.845, 0.790],
+  stripe: [0.480, 0.492, 0.510],
+  core: [0.085, 0.090, 0.098],
+};
+
+function makeFleet(THREE, api, carIds) {
+  const cars = carIds.map((id) => api._carById(id)).filter(Boolean);
+  const group = new THREE.Group();
+  group.name = 'B4_Fleet';
+
+  const byClass = { tall: [], mid: [], low: [] };
+  const slot = new Map();          // carId -> {cls, k}
+  cars.forEach((car) => {
+    const cls = roofClassOf(car.height);
+    slot.set(car.id, { cls, k: byClass[cls].length });
+    byClass[cls].push(car);
+  });
+
+  const idx = new Map();           // carId -> 全域 index
+  const entries = [];              // 依 carIds 順序
+  const classData = {};
+  const disposables = [];
+
+  for (const cls of ROOF_CLASSES) {
+    const list = byClass[cls];
+    if (!list.length) continue;
+    // 類別參考車：該類別的中位數尺寸（Fleet 原型以它烘焙，各車再用 instance scale 還原）
+    const med = (f) => { const a = list.map(f).sort((x, y) => x - y); return a[Math.floor(a.length / 2)]; };
+    const refCar = {
+      id: `__ref_${cls}`, length: med((c) => c.length), width: med((c) => c.width),
+      height: med((c) => c.height), wheelbase: med((c) => c.wheelbase),
+      brandColor: '#888888', comfort: { 車頂行李架: false, 天窗: false },
+    };
+    const refSp = deriveSpec(refCar, api._opts);
+    const B = buildCarGeometry(THREE, refSp, 'low');
+
+    // 車身：paint + trim + lamp + stripe + core → 一個 IM（頂點色）
+    const bodyList = [];
+    for (const key of ['paint', 'trim', 'lamp', 'stripe', 'core']) {
+      for (const it of B[key]) bodyList.push({ geo: it.geo, matrix: it.matrix, __c: VC[key] });
+    }
+    const bodyParts = bodyList.map((it) => {
+      const one = mergeGeos(THREE, [{ geo: it.geo, matrix: it.matrix }], it.__c);
+      return { geo: one };
+    });
+    const bodyGeo = mergeGeos(THREE, bodyParts);
+    bodyParts.forEach((p) => p.geo.dispose());
+    const glassGeo = mergeGeos(THREE, B.glass);
+    // 輪胎/輪圈以「單位半徑」烘焙，每個輪子一個 instance（位置與半徑逐台精確）
+    const tireUnit = tireGeometry(THREE, 1, 0.37, 14);
+    const rimUnit = rimGeometry(THREE, 1, 0.37, 6);
+    const shadowGeo = shadowGeometry(THREE, 1, 1);
+    for (const g of B.paint.concat(B.trim, B.lamp, B.stripe, B.core, B.glass, B.tire, B.wheel)) g.geo.dispose();
+
+    const n = list.length;
+    const mkIM = (geo, mat, count) => {
+      const im = new THREE.InstancedMesh(geo, mat, count);
+      im.frustumCulled = false;
+      im.castShadow = true; im.receiveShadow = true;
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      group.add(im);
+      return im;
+    };
+    const body = mkIM(bodyGeo, api._fleetPaintMat, n);
+    const glass = glassGeo ? mkIM(glassGeo, api._mat('car.glass'), n) : null;
+    const tire = mkIM(tireUnit, api._mat('car.tire'), n * 4);
+    const rim = mkIM(rimUnit, api._mat('car.wheel'), n * 4);
+    const shadow = mkIM(shadowGeo, api._shadowMat, n);
+    shadow.castShadow = false;
+    disposables.push(bodyGeo, glassGeo, tireUnit, rimUnit, shadowGeo);
+
+    const white = new THREE.Color(1, 1, 1);
+    body.setColorAt(0, white);
+    shadow.setColorAt(0, white);
+
+    classData[cls] = { list, refSp, body, glass, tire, rim, shadow, n };
+
+    list.forEach((car, k) => {
+      const sp = deriveSpec(car, api._opts);
+      const e = {
+        car, sp, cls, k,
+        pos: new THREE.Vector3(), quat: new THREE.Quaternion(),
+        visible: true, highlight: false, band: 0, dirty: true,
+        scale: new THREE.Vector3(sp.W / refSp.W, sp.H / refSp.H, sp.L / refSp.L),
+      };
+      idx.set(car.id, entries.length);
+      entries.push(e);
+    });
+  }
+
+  /* ── 每台車的品牌色調（★ setColorAt，不是發光） ── */
+  const tmpColor = new THREE.Color();
+  const applyColor = (e) => {
+    const cd = classData[e.cls];
+    const base = new THREE.Color(e.sp.bodyColor);
+    const brand = new THREE.Color(e.sp.brandColor);
+    tmpColor.copy(base).lerp(brand, e.highlight ? 0.26 : 0.14);
+    if (e.highlight) {
+      // 飽和度提升（HSL），不使用發光/bloom
+      const hsl = { h: 0, s: 0, l: 0 };
+      tmpColor.getHSL(hsl);
+      tmpColor.setHSL(hsl.h, clamp(hsl.s * 1.55 + 0.06, 0, 1), clamp(hsl.l * 1.03, 0, 1));
+    }
+    cd.body.setColorAt(e.k, tmpColor);
+    cd.body.instanceColor.needsUpdate = true;
+    // 陰影加深
+    cd.shadow.setColorAt(e.k, tmpColor.setScalar(e.highlight ? 0.62 : 1.0));
+    cd.shadow.instanceColor.needsUpdate = true;
+  };
+
+  const zero = new THREE.Vector3(0, 0, 0);
+  const mCar = new THREE.Matrix4(), mLocal = new THREE.Matrix4(), mOut = new THREE.Matrix4();
+  const qI = new THREE.Quaternion();
+  const vS = new THREE.Vector3(), vP = new THREE.Vector3();
+  const qW = new THREE.Quaternion(), axisY = new THREE.Vector3(0, 1, 0);
+  const ONE = new THREE.Vector3(1, 1, 1);
+
+  const writeInstance = (e) => {
+    const cd = classData[e.cls];
+    const hidden = !e.visible || e.band >= 2;
+    mCar.compose(e.pos, e.quat, ONE);
+    const hs = e.highlight ? 1.03 : 1.0;         // 高亮＝放大，不發光
+
+    // 車身
+    if (hidden) mOut.makeScale(0, 0, 0);
+    else {
+      vS.copy(e.scale).multiplyScalar(hs);
+      mOut.copy(mCar).multiply(mLocal.compose(zero, qI, vS));
+    }
+    cd.body.setMatrixAt(e.k, mOut);
+
+    // 車窗（LOD1 起省略）
+    if (cd.glass) {
+      if (hidden || e.band >= 1) mOut.makeScale(0, 0, 0);
+      cd.glass.setMatrixAt(e.k, mOut);
+    }
+
+    // 陰影（高亮時加深＋放大一點）
+    if (hidden) mOut.makeScale(0, 0, 0);
+    else {
+      vS.set(e.sp.W * 1.16 * (e.highlight ? 1.10 : 1), 1, e.sp.L * 1.02 * (e.highlight ? 1.06 : 1));
+      mOut.copy(mCar).multiply(mLocal.compose(vP.set(0, 0.0015, 0), qI, vS));
+    }
+    cd.shadow.setMatrixAt(e.k, mOut);
+
+    // 四個輪子（位置與半徑逐台精確）
+    const sp = e.sp;
+    const wpos = [
+      [sp.wheelX, sp.axleFZ, 1], [-sp.wheelX, sp.axleFZ, -1],
+      [sp.wheelX, sp.axleRZ, 1], [-sp.wheelX, sp.axleRZ, -1],
+    ];
+    for (let w = 0; w < 4; w++) {
+      const [x, z, s] = wpos[w];
+      if (hidden) mOut.makeScale(0, 0, 0);
+      else {
+        qW.setFromAxisAngle(axisY, s > 0 ? 0 : Math.PI);
+        vS.setScalar(sp.wheelR * hs);
+        mOut.copy(mCar).multiply(mLocal.compose(vP.set(x, sp.wheelR, z), qW, vS));
+      }
+      cd.tire.setMatrixAt(e.k * 4 + w, mOut);
+      if (hidden || e.band >= 1) mOut.makeScale(0, 0, 0);
+      cd.rim.setMatrixAt(e.k * 4 + w, mOut);
+    }
+  };
+
+  const fleet = {
+    group,
+    carIds: entries.map((e) => e.car.id),
+    indexOf(carId) { const i = idx.get(carId); return i === undefined ? -1 : i; },
+    setTransform(i, pos, quat) {
+      const e = entries[i]; if (!e) return;
+      if (pos) e.pos.copy(pos);
+      if (quat) e.quat.copy(quat);
+      e.dirty = true;
+    },
+    setHighlight(i, on) {
+      const e = entries[i]; if (!e || e.highlight === !!on) return;
+      e.highlight = !!on; e.dirty = true; applyColor(e);
+    },
+    setVisible(i, on) {
+      const e = entries[i]; if (!e || e.visible === !!on) return;
+      e.visible = !!on; e.dirty = true;
+    },
+    /** 一次性 flush instanceMatrix.needsUpdate */
+    commit() {
+      let any = false;
+      for (const e of entries) if (e.dirty) { writeInstance(e); e.dirty = false; any = true; }
+      if (!any) return;
+      for (const cls of ROOF_CLASSES) {
+        const cd = classData[cls]; if (!cd) continue;
+        cd.body.instanceMatrix.needsUpdate = true;
+        if (cd.glass) cd.glass.instanceMatrix.needsUpdate = true;
+        cd.tire.instanceMatrix.needsUpdate = true;
+        cd.rim.instanceMatrix.needsUpdate = true;
+        cd.shadow.instanceMatrix.needsUpdate = true;
+      }
+    },
+    /** LOD：>40 m 用簡化版（車身 + 輪胎）、>100 m 直接隱藏 */
+    updateLOD(camera) {
+      if (!camera) return;
+      const cp = camera.position;
+      let changed = false;
+      for (const e of entries) {
+        const d = Math.hypot(e.pos.x - cp.x, e.pos.y - cp.y, e.pos.z - cp.z);
+        const band = d > LOD_FAR ? 2 : (d > LOD_NEAR ? 1 : 0);
+        if (band !== e.band) { e.band = band; e.dirty = true; changed = true; }
+      }
+      if (changed) fleet.commit();
+    },
+    drawCalls() {
+      let n = 0;
+      for (const cls of ROOF_CLASSES) { const cd = classData[cls]; if (cd) n += 4 + (cd.glass ? 1 : 0); }
+      return n;
+    },
+    dispose() {
+      for (const g of disposables) if (g) g.dispose();
+      group.clear();
+      entries.length = 0; idx.clear();
+    },
+  };
+
+  for (const e of entries) applyColor(e);
+  fleet.commit();
+  return fleet;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 9. 工廠｜createCarModels(ctx)
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+export function createCarModels(ctx) {
+  const THREE = ctx && ctx.THREE;
+  if (!THREE) throw new Error('[carModels] ctx.THREE 缺失：本模組不在頂層 import three，必須由 ctx 注入。');
+  if (!ctx.materials || typeof ctx.materials.get !== 'function') {
+    throw new Error('[carModels] ctx.materials 缺失：材質一律向 B2 材質庫拿，本模組不自行 new Material。');
+  }
+
+  const opts = Object.assign({ wheelSpecIsDiameter: false }, ctx.carModelOptions || {});
+  const assetBase = ctx.assetBase || './';
+
+  const carsArr = Array.isArray(ctx.cars) ? ctx.cars : [];
+  const carsById = ctx.carsById || carsArr.reduce((m, c) => (m[c.id] = c, m), {});
+
+  /* ── 材質（一律 ctx.materials.get；只做 clone 改色，見檔頭假設 2） ── */
+  const matCache = new Map();
+  const _mat = (name) => {
+    if (!matCache.has(name)) matCache.set(name, ctx.materials.get(name));
+    return matCache.get(name);
+  };
+  const clones = [];
+  const cloneCache = new Map();
+  const _clone = (name, key, tweak) => {
+    const ck = `${name}|${key}`;
+    if (cloneCache.has(ck)) return cloneCache.get(ck);
+    const m = _mat(name).clone();
+    tweak(m);
+    cloneCache.set(ck, m); clones.push(m);
+    return m;
+  };
+  const paintMat = (hex) => _clone('car.paint', hex, (m) => { if (m.color) m.color.set(hex); });
+  const stripeMat = (hex) => _clone('car.paint', `stripe${hex}`, (m) => {
+    if (m.color) m.color.set(hex);
+    if ('roughness' in m) m.roughness = clamp((m.roughness ?? 0.4) * 0.85, 0.05, 1);
+  });
+  const darkMat = () => _clone('car.trim', 'wellDark', (m) => {
+    if (m.color) m.color.setRGB(0.055, 0.058, 0.064);
+    m.side = THREE.DoubleSide;      // 從輪拱開口看進去要看得到內襯的內側
+  });
+  const shadowMat = () => _clone('car.shadow', 'ground', (m) => {
+    m.transparent = true; m.depthWrite = false;
+    if ('polygonOffset' in m) { m.polygonOffset = true; m.polygonOffsetFactor = -2; }
+  });
+  const fleetPaintMat = () => _clone('car.paint', 'fleetVC', (m) => { m.vertexColors = true; });
+
+  /* ── 規格快取 ── */
+  const specCache = new Map();
+  const specOf = (carId) => {
+    if (specCache.has(carId)) return specCache.get(carId);
+    const car = carsById[carId];
+    if (!car) return null;
+    const sp = deriveSpec(car, opts);
+    specCache.set(carId, sp);
+    return sp;
+  };
+
+  /* ── 資產探測（真的去 fetch，不硬編 tier） ── */
+  const reports = new Map();          // series -> {tier, count, method, frames[]}
+  const seriesCars = new Map();       // series -> Car[]
+  for (const c of carsArr) {
+    if (!seriesCars.has(c.series)) seriesCars.set(c.series, []);
+    seriesCars.get(c.series).push(c);
+  }
+  const seriesLabel = (series) => {
+    const l = seriesCars.get(series);
+    return l && l.length ? `${l[0].brand} ${l[0].model}` : series;
+  };
+
+  function classify(rep) {
+    const method = rep && rep.method;
+    const n = (rep && Number(rep.frameCount)) || 0;
+    if (method === 'A-360序列' && n >= 8) return { tier: 1, count: n };
+    if (method === 'B-一般圖庫' || (n >= 3 && n <= 7)) return { tier: 2, count: n };
+    return { tier: 3, count: 0 };
+  }
+  function framesFor(series, rep, tier, n) {
+    if (tier === 3 || !n) return [];
+    const sub = tier === 1 ? '360' : 'angles';
+    const out = [];
+    if (rep && typeof rep.urlPattern === 'string' && rep.urlPattern.includes('%')) {
+      for (let i = 0; i < n; i++) {
+        out.push(rep.urlPattern.replace(/%0(\d)d/g, (_, w) => String(i + 1).padStart(Number(w), '0')));
+      }
+      return out;
+    }
+    for (let i = 0; i < n; i++) {
+      out.push(`${assetBase}assets/cars/${series}/${sub}/frame_${String(i + 1).padStart(3, '0')}.jpg`);
+    }
+    return out;
+  }
+
+  const probePromise = (async () => {
+    if (typeof fetch !== 'function') return;
+    await Promise.all([...seriesCars.keys()].map(async (series) => {
+      let rep = null;
+      try {
+        const res = await fetch(`${assetBase}assets/cars/${series}/report.json`, { cache: 'no-cache' });
+        if (res && res.ok) rep = await res.json();
+      } catch (e) { rep = null; }        // fetch 失敗 → tier 3（保守）
+      const { tier, count } = classify(rep);
+      reports.set(series, { tier, count, method: rep && rep.method, frames: framesFor(series, rep, tier, count) });
+    }));
+  })();
+
+  /* ── LOD0 單台 ── */
+  const meshTemplates = new Map();
+  const ownedGeos = [];
+
+  function buildTemplate(sp) {
+    const B = buildCarGeometry(THREE, sp, 'high');
+    const g = new THREE.Group();
+    g.name = `car_${sp.id}`;
+    const add = (list, material, cast = true) => {
+      const geo = mergeGeos(THREE, list);
+      if (!geo) return;
+      ownedGeos.push(geo);
+      const m = new THREE.Mesh(geo, material);
+      m.castShadow = cast; m.receiveShadow = true;
+      g.add(m);
+    };
+    add(B.paint, paintMat(sp.bodyColor));
+    add(B.trim, _mat('car.trim'));
+    add(B.core, darkMat());
+    add(B.glass, _mat('car.glass'));
+    add(B.lamp, _mat('car.lamp'));
+    add(B.stripe, stripeMat(sp.brandColor));
+    add(B.tire, _mat('car.tire'));
+    add(B.wheel, _mat('car.wheel'));
+    for (const k of Object.keys(B)) for (const it of B[k]) it.geo.dispose();
+    // 落地陰影
+    const sg = shadowGeometry(THREE, sp.L * 1.02, sp.W * 1.16);
+    ownedGeos.push(sg);
+    const sm = new THREE.Mesh(sg, shadowMat());
+    sm.position.y = 0.0015;
+    sm.receiveShadow = false; sm.castShadow = false;
+    g.add(sm);
+    g.userData.carId = sp.id;
+    g.userData.tier = 3;
+    return g;
+  }
+
+  /* ── Spin360 / 角度切換器登記簿（給 update 用） ── */
+  const viewers = new Set();
+  const fleets = new Set();
+
+  /* ── 場景環境光色調（給 Sprite/Plane 乘上去，讓車不跟場景色溫脫節） ── */
+  const tint = new THREE.Color(1, 1, 1);
+  let tintAge = 1e9;
+  function refreshTint(scene) {
+    if (!scene) return;
+    let r = 0, g = 0, b = 0, w = 0;
+    scene.traverse((o) => {
+      if (!o.isLight) return;
+      if (o.isAmbientLight || o.isHemisphereLight) {
+        const c = o.color, i = Math.min(o.intensity ?? 1, 2);
+        r += c.r * i; g += c.g * i; b += c.b * i; w += i;
+        if (o.isHemisphereLight && o.groundColor) {
+          r += o.groundColor.r * i * 0.35; g += o.groundColor.g * i * 0.35; b += o.groundColor.b * i * 0.35;
+          w += i * 0.35;
+        }
+      }
+    });
+    if (w > 0) {
+      const k = 1 / w;
+      tint.setRGB(clamp(r * k, 0.35, 1.25), clamp(g * k, 0.35, 1.25), clamp(b * k, 0.35, 1.25));
+    } else tint.setRGB(1, 1, 1);
+  }
+
+  /* ── 對外 API ── */
+  const api = {
+    _mat, _opts: opts, _shadowMat: shadowMat(), _fleetPaintMat: fleetPaintMat(),
+    _carById: (id) => carsById[id] || null,
+
+    /** LOD0 完整單台（近看／被告席／駕駛座用）。回傳可自由 add 的 clone。 */
+    getCarMesh(carId) {
+      const sp = specOf(carId);
+      if (!sp) return null;
+      if (!meshTemplates.has(carId)) meshTemplates.set(carId, buildTemplate(sp));
+      const t = meshTemplates.get(carId).clone(true);
+      t.userData.carId = carId;
+      t.userData.tier = api.getTier(carId).tier;
+      return t;
+    },
+
+    /** ★ 39 台同場必須走這條（InstancedMesh + LOD） */
+    createFleet(carIds) {
+      const f = makeFleet(THREE, api, carIds || carsArr.map((c) => c.id));
+      fleets.add(f);
+      const od = f.dispose;
+      f.dispose = () => { fleets.delete(f); od(); };
+      return f;
+    },
+
+    getTier(carId) {
+      const car = carsById[carId];
+      const series = car ? car.series : null;
+      const rep = series ? reports.get(series) : null;
+      const tier = rep ? rep.tier : 3;
+      const n = rep ? rep.count : 0;
+      if (tier === 3) {
+        return {
+          tier: 3,
+          label: TIER_LABEL[3](),
+          note: '尺寸依原廠公布之車長／車寬／車高／軸距生成；輪組位置與外觀細節為幾何推估，不代表實車鈑件。',
+        };
+      }
+      const shared = (seriesCars.get(series) || []).length > 1;
+      return {
+        tier,
+        label: TIER_LABEL[tier](n),
+        note: shared
+          ? `外觀圖為 ${seriesLabel(series)} 車系共用，各等級外觀差異未反映於圖中`
+          : `外觀圖為 ${seriesLabel(series)} 原廠官網素材`,
+      };
+    },
+
+    /** 公尺 */
+    getFootprint(carId) {
+      const sp = specOf(carId);
+      if (!sp) return null;
+      return { length: sp.L, width: sp.W, height: sp.H, wheelbase: sp.WB };
+    },
+
+    /** ★ 駕駛座眼點：依真實車高（CX-30 1540 與 Mufasa 1695 的視野差得看得出來） */
+    getEyePoint(carId) {
+      const sp = specOf(carId);
+      if (!sp) return null;
+      return new THREE.Vector3(-0.35, sp.H * 0.62, sp.axleFZ + Math.max(0.45, sp.WB * 0.22));
+    },
+
+    /** 第一層檢視器（本次無素材；仍完整實作，補上素材即可用） */
+    createSpin360(frames, el) {
+      const s = makeSpin360(THREE, Array.isArray(frames) ? frames : [], el);
+      s._baseMaterialFactory = () => shadowMat();
+      const oa = s.attach3D;
+      s.attach3D = (o = {}) => oa(Object.assign({ baseMaterial: shadowMat() }, o));
+      viewers.add(s);
+      const od = s.dispose;
+      s.dispose = () => { viewers.delete(s); od(); };
+      if (s.frames.length) s.load();
+      return s;
+    },
+
+    /** 第二層｜角度切換器（3–7 張，0.25 秒交叉淡入） */
+    createAngleSwitcher(images, el, hooks) {
+      const a = makeAngleSwitcher(THREE, Array.isArray(images) ? images : [], el, hooks);
+      const oa = a.attach3D;
+      a.attach3D = (o = {}) => oa(Object.assign({ baseMaterial: shadowMat() }, o));
+      viewers.add(a);
+      const od = a.dispose;
+      a.dispose = () => { viewers.delete(a); od(); };
+      if (a.frames.length) a.load();
+      return a;
+    },
+
+    /** 依 getTier 自動選層：tier1 → Spin360、tier2 → 角度切換器、tier3 → null（走 3D 模型） */
+    createViewerFor(carId, el) {
+      const car = carsById[carId];
+      const rep = car ? reports.get(car.series) : null;
+      if (!rep || rep.tier === 3 || !rep.frames.length) return null;
+      return rep.tier === 1 ? api.createSpin360(rep.frames, el) : api.createAngleSwitcher(rep.frames, el);
+    },
+
+    /** 資產探測完成後 resolve；rooms 可 await 再決定要不要顯示 360 入口 */
+    whenAssetsProbed() { return probePromise; },
+    getSeriesReport(series) { return reports.get(series) || null; },
+    getRoofClass(carId) { const c = carsById[carId]; return c ? roofClassOf(c.height) : null; },
+
+    update(dt, elapsed, camera) {
+      tintAge += dt;
+      if (tintAge > 0.5) { tintAge = 0; refreshTint(ctx.scene); }
+      for (const f of fleets) f.updateLOD(camera);
+      for (const v of viewers) v.update(dt, elapsed, camera, tint);
+    },
+
+    dispose() {
+      for (const v of [...viewers]) v.dispose();
+      viewers.clear();
+      for (const f of [...fleets]) f.dispose();
+      fleets.clear();
+      for (const g of ownedGeos) g.dispose();
+      ownedGeos.length = 0;
+      meshTemplates.clear();
+      for (const m of clones) m.dispose();
+      clones.length = 0;
+      cloneCache.clear(); matCache.clear(); specCache.clear();
+    },
+  };
+
+  return api;
+}
+
+export default createCarModels;

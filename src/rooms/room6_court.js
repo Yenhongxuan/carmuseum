@@ -54,6 +54,15 @@
  *   U3 被告的重選是 DOM 清單點選，不是 3D 拾取（沒有 raycast 選車）。
  *   U4 沉下動畫用位移表現，沒有逐台的材質淡出（InstancedMesh 無法逐實例改透明度，
  *      且 setTransform 不吃 scale）。
+ *   U5 「每項指控給三個相關立場」不保證湊得滿三個：選項一律用模擬算出來，
+ *      只列真的擋得掉、或真的會讓還能指控你的對手變少的立場（按鈕上分別標「會被擋下」
+ *      與「擋不掉，只是把對手從 N 個壓到 M 個」）。以全新的立場欄位重算，
+ *      39 台被告共 266 條指控裡有 8 條一個選項都湊不出來（cx-4 / xf-1 / tc-2 / tc-3 / sx-1 身上），
+ *      那時畫面直說「你剩下的立場，沒有一個擋得掉這一條」，不假造選項。
+ *   U6 「缺關鍵安全」只逐條起訴被告缺的項目裡「最多車有」的前三項（畫面小字有寫明總共缺幾項），
+ *      否則一台缺 8 項的車會被同一種指控洗版。
+ *   U7 立場淘汰掉的車會同步從 STATE.alive 移除並 emit CAR_ELIMINATED；
+ *      這是跨展廳的副作用，若主代理希望廳六不動 STATE.alive，改這一段即可。
  */
 
 import {
@@ -727,14 +736,12 @@ export function createRoom(ctx) {
 
     sinkCars(killed);
 
-    const before = st.accusations.map((a) => a.id);
+    const before = st.accusations.map((a) => ({ id: a.id, title: a.item ? `${a.title}·${a.item}` : a.title }));
     rebuild();
     const after = new Set(st.accusations.map((a) => a.id));
-    for (const id of before) {
-      if (!after.has(id) && !st.resolved.has(id)) {
-        st.resolved.set(id, killed.length
-          ? `「${def.label}」擋下 —— 連帶淘汰 ${killed.length} 台。`
-          : `「${def.label}」擋下 —— 沒有淘汰任何車，只是把這個面向排除在你的考量之外。`);
+    for (const b of before) {
+      if (!after.has(b.id) && !st.resolved.has(b.id)) {
+        st.resolved.set(b.id, { by: def.id, label: def.label, killed: killed.length, title: b.title });
       }
     }
     if (!st.accusations.length) {
@@ -759,6 +766,21 @@ export function createRoom(ctx) {
 
   /* ── 畫面 ───────────────────────────────────────────── */
   const esc = (s) => String(s).replace(/[&<>]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
+
+  /** 把「哪個立場擋掉了哪幾條」聚合起來，不要同一句話重複印五次 */
+  function resolvedSummary() {
+    const byStance = new Map();
+    for (const r of st.resolved.values()) {
+      if (!byStance.has(r.by)) byStance.set(r.by, { label: r.label, killed: r.killed, titles: [] });
+      byStance.get(r.by).titles.push(r.title);
+    }
+    return [...byStance.values()].map((g) => {
+      const what = `「${esc(g.label)}」擋下 ${g.titles.length} 項指控（${esc(g.titles.join('、'))}）`;
+      return g.killed
+        ? `${what} —— 連帶淘汰 ${g.killed} 台。`
+        : `${what} —— 沒有淘汰任何車，只是把這個面向排除在你的考量之外。`;
+    });
+  }
 
   function defsPanelHTML() {
     const alive = aliveIdSet();
@@ -855,8 +877,8 @@ export function createRoom(ctx) {
         </div>
         ${unavailable.length ? `<div class="b8c-note">不能用的立場：${
           unavailable.map((x) => `「${esc(x.s.label)}」（${esc(x.why)}）`).join('；')}</div>` : ''}
-        ${[...st.resolved.entries()].length ? `<div class="b8c-done">已經擋下 ${st.resolved.size} 項：<br>${
-          [...st.resolved.values()].map(esc).join('<br>')}</div>` : ''}
+        ${st.resolved.size ? `<div class="b8c-done">已經擋下 ${st.resolved.size} 項：<br>${
+          resolvedSummary().join('<br>')}</div>` : ''}
         ${defsPanelHTML()}
       </div>
       <div class="b8c-foot">
@@ -892,7 +914,7 @@ export function createRoom(ctx) {
         <div class="b8c-sub">撐過了 ${st.originalOrder.length} 項指控。</div>
       </div>
       <div class="b8c-body">
-        <div class="b8c-done">${[...st.resolved.values()].map(esc).join('<br>') || '檢方一開始就提不出指控。'}</div>
+        <div class="b8c-done">${resolvedSummary().join('<br>') || '檢方一開始就提不出指控。'}</div>
         <div class="b8c-note">代價：你說了 ${STATE.stances.length} 個立場
           ${STATE.stances.length ? `（${STATE.stances.map((s) => esc(s.label)).join('、')}）` : ''}，
           場上從 ${cars.length} 台剩下 ${alive} 台。這些立場之後不會被清空。</div>
@@ -970,7 +992,10 @@ export function createRoom(ctx) {
     },
 
     // 給 test/room6.html 檢視用（非 RoomHandle 規格的一部分）
-    _debug: { defs, conflicts, buildAccusations, state: st, aliveIdSet },
+    _debug: {
+      defs, conflicts, buildAccusations, state: st, aliveIdSet,
+      choose: chooseDefendant, takeStance, giveUp, optionsFor, render,
+    },
   };
 
   return handle;

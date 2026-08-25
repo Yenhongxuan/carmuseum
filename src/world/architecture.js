@@ -605,3 +605,161 @@ export function buildAlley(ctx) {
   root.userData.parkingArea = DIMENSIONS.alley.parkingArea;
   return root;
 }
+
+/* ==========================================================================
+ * 4. 廳三 · 空無停車場
+ * ========================================================================== */
+
+export function buildLot(ctx) {
+  const THREE = ctx.THREE;
+  const root = new THREE.Group();
+  root.name = 'arch.lot';
+  const bag = GeoBag(ctx);
+
+  const hw = L.W / 2, hd = L.D / 2;
+
+  /* ---- 4.1 地面：向 -X 的 1.5% 排水坡，但 12×12 m 的日格區保持平整 ---- */
+  const flatR = L.CELL.size / 2;
+  function lotH(x, z) {
+    const base = -L.SLOPE * (x + hw) + L.SLOPE * hw;                 // 中心 = 0
+    const d = Math.max(Math.abs(x - L.CELL.x), Math.abs(z - L.CELL.z));
+    const w = smooth01(flatR, flatR + 3.0, d);                       // 場內圈完全平整
+    const ripple = 0.012 * Math.sin(x * 0.23) * Math.sin(z * 0.31);
+    return base * w + ripple * w;
+  }
+  root.add(groundMesh(ctx, 'asphalt', L.W, L.D, 88, 68, lotH, 4.0));
+  root.userData.heightAt = lotH;
+
+  /* ---- 4.2 停車格 250 × 550 cm、白線寬 10 cm ---- */
+  const sideGeo = bevelBox(THREE, L.LINE_W, 0.008, L.STALL_L, 0.0015);
+  const endGeo = bevelBox(THREE, L.STALL_W, 0.008, L.LINE_W, 0.0015);
+  const sideI = [], endI = [];
+  const bays = [-19.0, -13.0, 9.0, 15.0];        // 4 排停車帶（避開中央日格區）
+  for (const bx of bays) {
+    const cx = bx + L.STALL_L / 2;
+    for (let k = -6; k <= 5; k++) {
+      const cz = k * L.STALL_W + L.STALL_W / 2;
+      if (Math.abs(cz) < flatR + 3.2 && Math.abs(cx) < flatR + 3.2) continue;
+      sideI.push({ p: [cx, lotH(cx, cz - L.STALL_W / 2) + 0.006, cz - L.STALL_W / 2], r: [0, Math.PI / 2, 0] });
+      endI.push({ p: [bx + (bx < 0 ? 0 : L.STALL_L), lotH(bx, cz) + 0.006, cz], r: [0, Math.PI / 2, 0] });
+    }
+    const czEnd = 6 * L.STALL_W - L.STALL_W / 2;
+    sideI.push({ p: [cx, lotH(cx, czEnd) + 0.006, czEnd], r: [0, Math.PI / 2, 0] });
+  }
+  root.add(instanced(ctx, sideGeo, 'roadline', sideI, { cast: false }));
+  root.add(instanced(ctx, endGeo, 'roadline', endI, { cast: false }));
+  // 車道方向箭頭（真實停車場的地面導引）
+  for (const az of [-12, -4, 4, 12]) {
+    bag.add('roadline', place(bevelBox(THREE, 2.2, 0.007, 0.16, 0.0015), 0.5, lotH(0.5, az) + 0.006, az));
+    bag.add('roadline', place(bevelBox(THREE, 0.7, 0.007, 0.16, 0.0015), 1.35, lotH(1.35, az) + 0.006, az + 0.30, 0, 0.7, 0));
+    bag.add('roadline', place(bevelBox(THREE, 0.7, 0.007, 0.16, 0.0015), 1.35, lotH(1.35, az) + 0.006, az - 0.30, 0, -0.7, 0));
+  }
+
+  /* ---- 4.3 周界：矮牆 + 鐵網圍籬，高 2.0 m（明確邊界）---- */
+  const wallSegs = [
+    { w: L.W + 0.6, d: 0.25, x: 0, z: -hd - 0.12 },
+    { w: L.W + 0.6, d: 0.25, x: 0, z: hd + 0.12 },
+    { w: 0.25, d: L.D, x: -hw - 0.12, z: 0 },
+    { w: 0.25, d: L.D, x: hw + 0.12, z: 0 },
+  ];
+  for (const s of wallSegs) {
+    bag.add('concrete.wall', place(bevelBox(THREE, s.w, 0.62, s.d), s.x, lotH(s.x, s.z) + 0.29, s.z));
+  }
+  // 上方鐵網（0.60 → 2.00 m），每 2.5 m 一根立柱
+  const meshPanel = bevelBox(THREE, 2.46, 1.36, 0.012, 0.001);
+  const postGeo = bevelBox(THREE, 0.06, 1.55, 0.06);
+  const panels = [], posts = [];
+  const addFence = (x0, z0x, x1, z1x) => {
+    const dx = x1 - x0, dz = z1x - z0x, len = Math.hypot(dx, dz);
+    const n = Math.floor(len / 2.5), yaw = Math.atan2(dx, dz) + Math.PI / 2;
+    for (let i = 0; i < n; i++) {
+      const t = (i + 0.5) / n, px = x0 + dx * t, pz = z0x + dz * t;
+      panels.push({ p: [px, lotH(px, pz) + 1.30, pz], r: [0, yaw, 0] });
+    }
+    for (let i = 0; i <= n; i++) {
+      const t = i / n, px = x0 + dx * t, pz = z0x + dz * t;
+      posts.push({ p: [px, lotH(px, pz) + 1.32, pz], r: [0, yaw, 0] });
+    }
+  };
+  addFence(-hw, -hd - 0.12, hw, -hd - 0.12);
+  addFence(-hw, hd + 0.12, hw, hd + 0.12);
+  addFence(-hw - 0.12, -hd, -hw - 0.12, hd);
+  addFence(hw + 0.12, -hd, hw + 0.12, hd);
+  root.add(instanced(ctx, meshPanel, 'chainlink', panels, { cast: false }));
+  root.add(instanced(ctx, postGeo, 'lightpole', posts));
+
+  /* ---- 4.4 照明燈桿 7 m（4 根，只做外殼，光源由 B3 給）---- */
+  const poleParts = [];
+  poleParts.push(place(new THREE.CylinderGeometry(0.075, 0.115, L.POLE_H, 14), 0, L.POLE_H / 2, 0));
+  poleParts.push(place(bevelBox(THREE, 0.42, 0.10, 0.42), 0, 0.05, 0));                 // 底座
+  poleParts.push(place(bevelBox(THREE, 0.30, 0.28, 0.06), 0, 0.75, 0.19));              // 檢修孔蓋
+  poleParts.push(place(new THREE.CylinderGeometry(0.055, 0.055, 1.30, 10), 0, L.POLE_H - 0.10, 0.60, Math.PI / 2 - 0.22, 0, 0)); // 燈臂
+  const poleGeo = mergeGeos(THREE, poleParts);
+  const headParts = [];
+  headParts.push(place(bevelBox(THREE, 0.46, 0.14, 0.72), 0, L.POLE_H + 0.10, 1.22));
+  headParts.push(place(bevelBox(THREE, 0.40, 0.05, 0.62), 0, L.POLE_H + 0.005, 1.22));
+  const headGeo = mergeGeos(THREE, headParts);
+  const poleAt = [[-16, -12], [16, -12], [-16, 12], [16, 12]];
+  const poleInst = poleAt.map((p, i) => ({ p: [p[0], lotH(p[0], p[1]), p[1]], r: [0, (i % 2 ? 1 : -1) * Math.PI / 2, 0] }));
+  root.add(instanced(ctx, poleGeo, 'lightpole', poleInst));
+  root.add(instanced(ctx, headGeo, 'track.head', poleInst));
+
+  /* ---- 4.5 只有真實世界才有的雜物：排水溝、輪擋、繳費機、車阻柱、緣石收邊 ---- */
+  // 排水明溝（坡度最低的 -X 側）＋ 鑄鐵格柵
+  bag.add('concrete.wall', place(bevelBox(THREE, 0.44, 0.30, L.D - 1.0), -hw + 0.55, lotH(-hw + 0.55, 0) - 0.14, 0));
+  const grate = bevelBox(THREE, 0.36, 0.035, 0.90, 0.0015);
+  const grateI = [];
+  for (let i = -17; i <= 17; i++) grateI.push({ p: [-hw + 0.55, lotH(-hw + 0.55, i) + 0.002, i] });
+  root.add(instanced(ctx, grate, 'barrier.metal', grateI, { cast: false }));
+  // 輪擋（每個停車格前緣一根）
+  const stopGeo = bevelBox(THREE, 0.16, 0.11, 1.60, 0.003);
+  const stopI = [];
+  for (const bx of bays) {
+    for (let k = -6; k <= 5; k++) {
+      const cz = k * L.STALL_W + L.STALL_W / 2;
+      const px = bx + (bx < 0 ? 0.9 : L.STALL_L - 0.9);
+      if (Math.abs(cz) < flatR + 3.2 && Math.abs(px) < flatR + 3.2) continue;
+      stopI.push({ p: [px, lotH(px, cz) + 0.055, cz] });
+    }
+  }
+  root.add(instanced(ctx, stopGeo, 'barrier.concrete', stopI));
+  // 自動繳費機
+  bag.add('barrier.metal', place(bevelBox(THREE, 0.46, 1.42, 0.36), 3.2, lotH(3.2, -hd + 2.2) + 0.71, -hd + 2.2));
+  bag.add('label.card', place(new THREE.PlaneGeometry(0.30, 0.22), 3.2, lotH(3.2, -hd + 2.2) + 1.10, -hd + 2.0));
+  bag.add('lightpole', place(bevelBox(THREE, 0.52, 0.06, 0.42), 3.2, lotH(3.2, -hd + 2.2) + 1.45, -hd + 2.2));
+  // 車阻柱（出入口）
+  for (let i = 0; i < 5; i++) {
+    const px = -2.4 + i * 1.2;
+    bag.add('lightpole', place(new THREE.CylinderGeometry(0.055, 0.065, 0.90, 12), px, lotH(px, hd - 0.9) + 0.45, hd - 0.9));
+  }
+  // 場地緣石收邊（地面與圍牆之間不直接相交）
+  for (const s of wallSegs) {
+    const cw = s.w > s.d ? s.w - 0.4 : 0.16, cd = s.w > s.d ? 0.16 : s.d - 0.4;
+    const ox = s.x === 0 ? 0 : (s.x > 0 ? -0.22 : 0.22);
+    const oz = s.z === 0 ? 0 : (s.z > 0 ? -0.22 : 0.22);
+    bag.add('curb', place(bevelBox(THREE, cw, 0.20, cd), s.x + ox, lotH(s.x + ox, s.z + oz) + 0.06, s.z + oz));
+  }
+  // 日格區的鋪面收邊（B6 的 12×12 m 區域邊界，讓玩家看得出來這塊是平的）
+  for (const e of [[0, -flatR - 0.2, L.CELL.size + 0.4, 0.14], [0, flatR + 0.2, L.CELL.size + 0.4, 0.14],
+                   [-flatR - 0.2, 0, 0.14, L.CELL.size + 0.4], [flatR + 0.2, 0, 0.14, L.CELL.size + 0.4]]) {
+    bag.add('curb', place(bevelBox(THREE, e[2], 0.09, e[3]), L.CELL.x + e[0], 0.038, L.CELL.z + e[1]));
+  }
+  // 荒廢感：裂縫旁的一叢雜草（InstancedMesh）
+  const weed = new THREE.PlaneGeometry(0.05, 0.16);
+  weed.translate(0, 0.08, 0);
+  const weedI = []; const wr = mulberry(0x2C1A77);
+  for (let i = 0; i < 900; i++) {
+    const px = -hw + wr() * L.W, pz = -hd + wr() * L.D;
+    if (Math.max(Math.abs(px - L.CELL.x), Math.abs(pz - L.CELL.z)) < flatR + 1.0) continue;
+    weedI.push({ p: [px, lotH(px, pz), pz], r: [0, wr() * Math.PI, 0], s: [1, 0.6 + wr() * 0.9, 1] });
+  }
+  root.add(instanced(ctx, weed, 'grass.blade', weedI, { cast: false }));
+
+  root.add(skyDome(ctx, 300));
+
+  const dc = bag.flush(root, { 'roadline': { cast: false }, 'curb': { cast: true } });
+  DIMENSIONS.lot.drawCallEstimate = dc + 9;
+  root.userData.dimensions = DIMENSIONS.lot;
+  root.userData.cellField = DIMENSIONS.lot.cellField;
+  return root;
+}

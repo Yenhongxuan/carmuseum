@@ -69,12 +69,12 @@ const postMaterial = new THREE.ShaderMaterial({
     varying vec2 vUv;
     uniform sampler2D tDiffuse; uniform vec2 uRes;
     uniform float uExposure, uVignette, uCA, uGrain, uTime;
-    vec3 RRTAndODTFit(vec3 v){ vec3 a = v*(v+0.0245786)-0.000090537;
+    vec3 acesFit(vec3 v){ vec3 a = v*(v+0.0245786)-0.000090537;
       vec3 b = v*(0.983729*v+0.4329510)+0.238081; return a/b; }
     vec3 ACESFilmic(vec3 color){
       const mat3 IN = mat3(0.59719,0.07600,0.02840, 0.35458,0.90834,0.13383, 0.04823,0.01566,0.83777);
       const mat3 OUT= mat3(1.60475,-0.10208,-0.00327, -0.53108,1.10813,-0.07276, -0.07367,-0.00605,1.07602);
-      color *= uExposure / 0.6; color = IN*color; color = RRTAndODTFit(color); color = OUT*color;
+      color *= uExposure / 0.6; color = IN*color; color = acesFit(color); color = OUT*color;
       return clamp(color, 0.0, 1.0); }
     vec3 linearToSRGB(vec3 c){
       return mix(c*12.92, 1.055*pow(max(c,vec3(0.0)), vec3(0.41666))-0.055, step(vec3(0.0031308), c)); }
@@ -97,6 +97,7 @@ const postMaterial = new THREE.ShaderMaterial({
       gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
     }`,
   depthTest: false, depthWrite: false,
+  toneMapped: false,   // ★ 關鍵：本 shader 自己做 ACES，不可讓 three 再注入一次
 });
 const postScene = new THREE.Scene();
 const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
@@ -369,11 +370,12 @@ window.__museum = {
   errors: () => errors.slice(),
   rooms: () => ROOM_META.map(m => m.key),
   stats: () => ({
-    drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles,
+    drawCalls: sceneInfo.calls, triangles: sceneInfo.triangles,
     programs: renderer.info.programs?.length ?? -1, geometries: renderer.info.memory.geometries,
     textures: renderer.info.memory.textures, room: currentKey,
     materialStats: materials.stats ? materials.stats() : null,
   }),
+  __scene: scene,
   dims: () => arch.DIMENSIONS,
   /** 驗收截圖：必須在同一個 task 內 render 後立刻讀，否則 drawingBuffer 已被清除 */
   capture: () => { renderFrame(); return renderer.domElement.toDataURL('image/png'); },
@@ -384,15 +386,22 @@ window.__museum = {
 /* ════════════════════════════════════════════════════════════
    ⑦ 主迴圈
    ════════════════════════════════════════════════════════════ */
+let sceneInfo = { calls: 0, triangles: 0, lines: 0, points: 0 };
+function grabInfo() {
+  const i = renderer.info.render;
+  sceneInfo = { calls: i.calls, triangles: i.triangles, lines: i.lines, points: i.points };
+}
 function renderFrame() {
   if (postEnabled) {
     renderer.setRenderTarget(hdrRT);
     renderer.render(scene, camera);
+    grabInfo();                       // ★ 必須在後製那一趟之前取，否則只會讀到後製的 1 個 draw call
     renderer.setRenderTarget(null);
     postMaterial.uniforms.tDiffuse.value = hdrRT.texture;
     renderer.render(postScene, postCamera);
   } else {
     renderer.render(scene, camera);
+    grabInfo();
   }
 }
 
@@ -418,8 +427,7 @@ function tick(now) {
   fpsAcc += raw; fpsFrames++;
   if (fpsAcc >= 500) {
     fpsShown = 1000 / (fpsAcc / fpsFrames); fpsAcc = 0; fpsFrames = 0;
-    const i = renderer.info.render;
-    perfEl.textContent = `${fpsShown.toFixed(0)} fps　·　${i.calls} draw calls　·　${(i.triangles / 1000).toFixed(0)}k tri`
+    perfEl.textContent = `${fpsShown.toFixed(0)} fps　·　${sceneInfo.calls} draw calls　·　${(sceneInfo.triangles / 1000).toFixed(0)}k tri`
       + (materials.isGrayscale() ? '\n【灰階檢驗中】' : '') + (postEnabled ? '' : '\n【後製關閉】');
   }
   const meta = ROOM_META.find(m => m.key === currentKey);

@@ -324,14 +324,29 @@ function mergeGeos(THREE, list, vertexColor) {
   }
   if (!parts.length) return null;
   const pos = new Float32Array(total * 3), nor = new Float32Array(total * 3), uv = new Float32Array(total * 2);
-  const col = vertexColor ? new Float32Array(total * 3) : null;
+  // ★ 第 3 階段整合修正：外層合併必須保留各 part 既有的 color attribute。
+  //   原本只有在傳入 vertexColor 時才產生 color，導致「內層逐部位上色 → 外層合併」時整組頂點色被丟掉，
+  //   而 fleet 車身材質是 vertexColors:true —— WebGL 對缺席的頂點屬性回傳 (0,0,0)，車身就被乘成全黑。
+  const anyColor = !!vertexColor || parts.some((g) => !!g.getAttribute('color'));
+  const col = anyColor ? new Float32Array(total * 3) : null;
   let o = 0;
   for (const g of parts) {
     const p = g.getAttribute('position'), nn = g.getAttribute('normal'), u = g.getAttribute('uv');
     pos.set(p.array.subarray(0, p.count * 3), o * 3);
     nor.set(nn.array.subarray(0, nn.count * 3), o * 3);
     uv.set(u.array.subarray(0, u.count * 2), o * 2);
-    if (col) for (let i = 0; i < p.count; i++) { col[(o + i) * 3] = vertexColor[0]; col[(o + i) * 3 + 1] = vertexColor[1]; col[(o + i) * 3 + 2] = vertexColor[2]; }
+    if (col) {
+      const src = vertexColor ? null : g.getAttribute('color');
+      for (let i = 0; i < p.count; i++) {
+        if (vertexColor) {
+          col[(o + i) * 3] = vertexColor[0]; col[(o + i) * 3 + 1] = vertexColor[1]; col[(o + i) * 3 + 2] = vertexColor[2];
+        } else if (src) {
+          col[(o + i) * 3] = src.array[i * 3]; col[(o + i) * 3 + 1] = src.array[i * 3 + 1]; col[(o + i) * 3 + 2] = src.array[i * 3 + 2];
+        } else {           // 沒有頂點色的 part 一律填白，讓它保持材質本色
+          col[(o + i) * 3] = 1; col[(o + i) * 3 + 1] = 1; col[(o + i) * 3 + 2] = 1;
+        }
+      }
+    }
     o += p.count;
     g.dispose();
   }

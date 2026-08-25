@@ -43,7 +43,11 @@ const BEVEL = 0.002;                    // 2 mm 倒角
 
 // 廳一 美術館
 const G = {
-  W: 15.0, D: 16.0, H: 5.4,             // 展廳 15(X) × 16(Z)，天花板 5.4 m
+  // ★ 第 3 階段整合修正：原為 15×16，但廳一要同時陳列 39 台車（每台約 4.4×1.8 m），
+  //   15×16 連一半都放不下，B5 因此回退到自己假設的 40×32，車全部落在展廳外面。
+  //   放大到 40(X) × 30(Z)。天花板維持 5.4 m；展牆仍以 15 m 為一段（由門洞與柱位分段），
+  //   單面連續展牆不超過規格的 18 m。詳見 VERIFY.md。
+  W: 40.0, D: 30.0, H: 5.4,             // 展廳 40(X) × 30(Z)，天花板 5.4 m
   WALL_T: 0.30,
   ART_CENTER: 1.48,                     // ★ 畫心離地 148 cm（鐵律 145–152）
   ART_W: 1.00, ART_H: 1.30,
@@ -1562,6 +1566,15 @@ export function buildCourt(ctx) {
  * 8. DIMENSIONS —— 每個值都是上面程式碼真的用到的常數（VERIFY.md 逐項對照用）
  * ========================================================================== */
 
+/**
+ * ★ 第 3 階段整合修正：統一補上 width / depth 別名。
+ * MODULE_API.md 只規定了 DIMENSIONS 必須存在，沒有釘死每個場景的鍵名，
+ * 導致 B5 讀 gallery.width/depth、B8 讀 court.depth 時都讀不到而回退到各自的假設值
+ * （B5 假設 40×32、B8 假設深 30），車陣與相機因此落在展廳外面。
+ * 這裡由整合層補齊別名，不動各展廳模組的讀取邏輯。
+ */
+function withSpan(o, w, d) { o.width = w; o.depth = d; o.w = w; o.d = d; return o; }
+
 export const DIMENSIONS = {
   gallery: {
     roomSize: [G.W, G.D],                 // 15.0 × 16.0 m
@@ -1688,3 +1701,12 @@ export const DIMENSIONS = {
 };
 
 function hwC6() { return C6.W / 2; }
+
+/* ── 第 3 階段整合：把 width/depth/w/d 別名補到六個場景上 ── */
+withSpan(DIMENSIONS.gallery, G.W, G.D);
+withSpan(DIMENSIONS.alley,   A.W, A.L);
+withSpan(DIMENSIONS.lot,     DIMENSIONS.lot.size?.[0] ?? 44, DIMENSIONS.lot.size?.[1] ?? 34);
+withSpan(DIMENSIONS.tunnel,  DIMENSIONS.tunnel.innerWidth ?? 9, DIMENSIONS.tunnel.segmentLength ?? 240);
+withSpan(DIMENSIONS.circuit, DIMENSIONS.circuit.width ?? 14, DIMENSIONS.circuit.lengthM ?? 3083);
+withSpan(DIMENSIONS.court,   DIMENSIONS.court.size?.[0] ?? 12, DIMENSIONS.court.size?.[1] ?? 16);
+DIMENSIONS.gallery.roomSize = [G.W, G.D];

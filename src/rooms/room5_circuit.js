@@ -1199,10 +1199,12 @@ ${bp.kind === 'data' ? `<span>這一條不是配備缺少，是你查不到。</
 
     // ── 供測試 / 驗收用（不屬於 RoomHandle 必要介面） ────────────────────
     _debug: {
-      bumps, runners, REGRETS,
+      bumps, bumpById, runners, REGRETS, locks, lockPct,
       hitCounts: () => bumps.map((b) => ({ id: b.id, got: b.hitCount, expected: b.expected })),
       mismatch: bumpMismatch,
       onWeightChange, setWeight, jumpTo, removeRegret,
+      setLock: (d, on) => { locks[d] = !!on; if (on) captureLock(d); syncKnobs(); },
+      get lockWarn() { return lockWarn; },
       get player() { return player; },
       get packU() { return packU; },
       trackOrder: () => alive().slice().sort((a, b) => b.u - a.u).map((r) => r.car.id),

@@ -375,6 +375,8 @@ window.__museum = {
     materialStats: materials.stats ? materials.stats() : null,
   }),
   dims: () => arch.DIMENSIONS,
+  /** 驗收截圖：必須在同一個 task 內 render 後立刻讀，否則 drawingBuffer 已被清除 */
+  capture: () => { renderFrame(); return renderer.domElement.toDataURL('image/png'); },
   tiers: () => cars.map(c => ({ id: c.id, model: c.model, trim: c.trim, ...carModels.getTier(c.id) })),
   ready: false,
 };
@@ -382,6 +384,18 @@ window.__museum = {
 /* ════════════════════════════════════════════════════════════
    ⑦ 主迴圈
    ════════════════════════════════════════════════════════════ */
+function renderFrame() {
+  if (postEnabled) {
+    renderer.setRenderTarget(hdrRT);
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(null);
+    postMaterial.uniforms.tDiffuse.value = hdrRT.texture;
+    renderer.render(postScene, postCamera);
+  } else {
+    renderer.render(scene, camera);
+  }
+}
+
 let last = performance.now(), t0 = last, fpsAcc = 0, fpsFrames = 0, fpsShown = 0;
 function tick(now) {
   requestAnimationFrame(tick);
@@ -398,15 +412,7 @@ function tick(now) {
   if (materials.update) { try { materials.update(elapsed); } catch (_) {} }
 
   postMaterial.uniforms.uTime.value = elapsed;
-  if (postEnabled) {
-    renderer.setRenderTarget(hdrRT);
-    renderer.render(scene, camera);
-    renderer.setRenderTarget(null);
-    postMaterial.uniforms.tDiffuse.value = hdrRT.texture;
-    renderer.render(postScene, postCamera);
-  } else {
-    renderer.render(scene, camera);
-  }
+  renderFrame();
 
   if (benchHook) benchHook(raw);
   fpsAcc += raw; fpsFrames++;

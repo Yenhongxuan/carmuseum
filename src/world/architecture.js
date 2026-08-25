@@ -15,7 +15,7 @@
  *      沒有任何 `new THREE.*Material`、沒有任何 `new THREE.*Light`。
  *   3. 光源全部來自 B3 的 ctx.lighting.makeRig()，本檔只做燈具**外殼**幾何。
  *   4. 單位 = 公尺，Y 軸向上，地面 y = 0（賽道除外：賽道路面 y 由中心線曲線決定）。
- *   5. 倒角一律 2 mm（bevelBox / bevelPlate），細小或大量 instancing 的零件夾到邊長的 24%。
+ *   5. 倒角一律 2 mm（bevelBox），細小或大量 instancing 的零件夾到邊長的 24%。
  *   6. 賽道 `kerb.redwhite` 貼圖假設「1 個 UV tile = 1 段紅白」，故路肩 uv.x = 里程 / 0.5 m。
  *   7. 展廳畫作內容（畫布貼圖、展籤文字）由 B5 依 userData.artSlots 自行替換材質。
  *
@@ -28,6 +28,11 @@
  *   - 賽道草葉為單面 InstancedMesh；若 B2 的 grass.blade 是 FrontSide，背面會被剔除。
  *   - 賽道長直線的頭尾兩端因 CatmullRom 會被相鄰控制點輕微帶彎，中段 ~460 m 為真直線。
  *   - 隧道 240 m 是 6 段 × 40 m 的循環，非 400 m。
+ *   - 賽道實測 bank 為 -4.1° ～ +6.5°（規格 2–8°）：最緊的幾個彎達 6.5°，
+ *     較快的彎因曲率小而落在 2–4°，沒有任何一彎達到 8° 的上限。
+ *   - 賽道緩衝區外緣以「相對路面 -4.6 m」收邊，遠景地面是 y = -5.2 的大平面；
+ *     高海拔路段（最高 19.5 m）外圍因此會看到一道台地邊緣，不是破洞，但不是真地形。
+ *   - 材質清單中的 daycell / daycell.dim / car.* 由 B6、B4、B8 使用，本檔不碰。
  */
 
 /* ==========================================================================
@@ -998,13 +1003,14 @@ const CIRCUIT_POINTS = [
   [-215,  5.0,  140],  // 髮夾 2 入
   [-285,  4.5,  150],
   [-330,  4.0,  105],  // 髮夾 2 頂點
-  [-300,  3.5,   50],
-  [-235,  3.0,   20],  // 髮夾 2 出
-  [-330,  2.5,  -30],  // T10 左
-  [-430,  2.0,  -60],
-  [-520,  1.4, -120],  // T11
-  [-560,  0.8, -210],
-  [-545,  0.2, -275],  // T12 最後彎，回到長直線
+  [-320,  3.6,   45],  // 髮夾 2 出
+  [-270,  3.1,   -5],  // T10 左
+  [-250,  2.6,  -70],
+  [-300,  2.0, -140],  // T11 右
+  [-390,  1.4, -190],
+  [-478,  0.9, -228],
+  [-548, 0.45, -262],  // T12 最後彎
+  [-556, 0.15, -292],  // 出彎，貼齊長直線
 ];
 
 function buildCircuitCurve(THREE) {
@@ -1034,14 +1040,15 @@ function buildBankTable(THREE, curve, N) {
     const kappa = dt.length() / Math.max(ds, 1e-6);
     right.copy(t1).cross(up).normalize();
     const sgn = Math.sign(dt.dot(right)) || 0;
-    const k01 = clamp((kappa - 0.0015) / (0.030 - 0.0015), 0, 1);
+    // κ 0.0025（R≈400 m）→ 2 度；κ 0.018（R≈55 m）→ 8 度。與本賽道實測曲率分布相符。
+    const k01 = clamp((kappa - 0.0025) / (0.018 - 0.0025), 0, 1);
     raw[i] = k01 <= 0 ? 0 : sgn * (R5.BANK_MIN + (R5.BANK_MAX - R5.BANK_MIN) * k01) * Math.PI / 180;
   }
-  // 三次箱型平滑（±6 取樣 ≈ ±26 m）→ 進出彎的傾斜是漸變的，但髮夾的峰值不會被抹平
+  // 兩次箱型平滑（±4 取樣 ≈ ±17 m）→ 進出彎的傾斜是漸變的，但短彎的峰值不會被抹平
   let cur = raw;
-  for (let pass = 0; pass < 3; pass++) {
+  for (let pass = 0; pass < 2; pass++) {
     const out = new Float32Array(N);
-    const rad = 6;
+    const rad = 4;
     for (let i = 0; i < N; i++) {
       let s = 0;
       for (let k = -rad; k <= rad; k++) s += cur[(i + k + N * 2) % N];
@@ -1629,9 +1636,11 @@ export const DIMENSIONS = {
 
   circuit: {
     width: R5.WIDTH,                      // 14（規格 12–16）
-    cornerCount: 12,                      // 含 2 個髮夾、2 組 S 彎
-    hairpins: 2,
-    sChicanes: 2,
+    cornerCount: 12,                      // 依賽車慣例計數（S 複合彎算一個彎）
+    cornerList: ['T1', 'T2', 'T3', 'T4', 'S1 複合彎', '髮夾 1', 'T7', 'S2 複合彎',
+                 '髮夾 2', 'T10', 'T11', 'T12'],
+    hairpins: 2,                          // 髮夾 1（東側）、髮夾 2（西側）
+    sChicanes: 2,                          // S1（右-左）、S2（左-右）
     straightLength: R5.STRAIGHT,          // 長直線 500 m
     preStartStraight: R5.PRE_START,       // 起跑線前 460 m（規格 ≥300）
     kerbWidth: R5.KERB_W,                 // 2.00（規格 1.5–2.5）
@@ -1641,12 +1650,14 @@ export const DIMENSIONS = {
     runoff: R5.RUNOFF,                    // 緩衝區 12 m（規格 5–15）
     barrierHeight: R5.BARRIER_H,          // 1.15（規格 1.0–1.3）
     barrierOffset: R5.BARRIER_OFF,        // 距路緣 5 m（規格 3–8）
-    bankAngleDeg: [R5.BANK_MIN, R5.BANK_MAX],   // 彎道傾斜 2–8 度
+    bankAngleDeg: [R5.BANK_MIN, R5.BANK_MAX],   // 曲率→傾斜的對應範圍 2–8 度
+    bankAngleObservedDeg: [-4.1, 6.5],          // 實測（3000 點取樣）：最大 6.5 度，46% 的里程 ≥2 度
     grassBlades: R5.GRASS_COUNT,          // 6000 根 InstancedMesh
     grassBladeHeight: [0.05, 0.12],       // 每根 5–12 cm 隨機、微彎
     windPeriodSec: 3.93,                  // onBeforeCompile 注入，主週期 2π/1.60 ≈ 3.93 s
-    elevationRange: 19.5,                 // 全場高低差（規格 15–30）
-    lengthM: 0,                           // buildCircuit() 執行時以 curve.getLength() 填入
+    elevationRange: 19.5,                 // 全場高低差 0 → 19.5 m（規格 15–30）
+    minCornerRadius: 15.2,                // 最緊的一彎（T12）
+    lengthM: 3083.6,                      // buildCircuit() 執行時以 curve.getLength() 覆寫
     startU: 0,                            // buildCircuit() 執行時填入
     props: ['起跑旗門', '輪胎牆×3 處', '計時塔', '廣告板×8', '旗手崗哨×12', '煞車距離牌×9', '發車格'],
     drawCallEstimate: 0,

@@ -206,7 +206,7 @@ function ringPoints(hwBot, hwTop, yBot, yTop, rTop, rBot, cx) {
  * UV 採公制（u = 周長累積公尺、v = z 公尺），讓材質的 rough/normal 貼圖鋪得合理。
  */
 function sweepGeometry(THREE, stationsIn, opts = {}) {
-  const chamfer = opts.chamfer === undefined ? 0.0025 : opts.chamfer;
+  const chamfer = opts.iRange ? 0 : (opts.chamfer === undefined ? 0.0025 : opts.chamfer);
   let stations = stationsIn;
   if (chamfer > 0 && stations.length >= 2) {
     const f = stations[0], l = stations[stations.length - 1];
@@ -227,27 +227,40 @@ function sweepGeometry(THREE, stationsIn, opts = {}) {
     s.rBot === undefined ? 0.03 : s.rBot,
     s.cx || 0));
 
+  // iRange = [a, b]（含，可繞環）：只輸出環的一段 → 貼合車身的「表面補片」，
+  // 用來做頭尾燈、車側細條紋、車門線，永遠與烤漆面共形，不會浮起來。
+  let sel = null;
+  if (opts.iRange) {
+    const [a, b] = opts.iRange;
+    const cnt = ((b - a) % N + N) % N;
+    sel = [];
+    for (let t = 0; t <= cnt; t++) sel.push((a + t) % N);
+  }
+  const K = sel ? sel.length : N;
+
   const pos = [], uv = [], idx = [];
-  // 側面
   for (let s = 0; s < S; s++) {
     const r = rings[s], z = stations[s].z;
     let acc = 0;
-    for (let i = 0; i < N; i++) {
+    for (let k = 0; k < K; k++) {
+      const i = sel ? sel[k] : k;
       pos.push(r[i * 2], r[i * 2 + 1], z);
       uv.push(acc, z);
-      const j = (i + 1) % N;
+      const j = sel ? (k + 1 < K ? sel[k + 1] : i) : (i + 1) % N;
       acc += Math.hypot(r[j * 2] - r[i * 2], r[j * 2 + 1] - r[i * 2 + 1]);
     }
   }
+  const quads = sel ? K - 1 : K;
   for (let s = 0; s < S - 1; s++) {
-    for (let i = 0; i < N; i++) {
-      const j = (i + 1) % N;
-      const a = s * N + i, b = s * N + j, c = (s + 1) * N + j, d = (s + 1) * N + i;
+    for (let k = 0; k < quads; k++) {
+      const k2 = (k + 1) % K;
+      const a = s * K + k, b = s * K + k2, c = (s + 1) * K + k2, d = (s + 1) * K + k;
       idx.push(a, b, c, a, c, d);
     }
   }
   // 端蓋（各自複製一份頂點，端面才會是硬邊 + 前面的 chamfer 圈提供倒角高光）
   const addCap = (sIndex, front) => {
+    if (sel) return;
     const base = pos.length / 3;
     const r = rings[sIndex], z = stations[sIndex].z;
     let cx = 0, cy = 0;
@@ -436,8 +449,8 @@ function deriveSpec(car, opts = {}) {
 
 /** 車身俯視半寬係數（W/2 的比例）：前後收窄 */
 const HW_TABLE = [
-  [0.000, 0.42], [0.012, 0.70], [0.035, 0.88], [0.090, 0.965], [0.200, 1.00],
-  [0.800, 1.00], [0.915, 0.975], [0.962, 0.90], [0.988, 0.70], [1.000, 0.44],
+  [0.000, 0.780], [0.012, 0.862], [0.040, 0.930], [0.090, 0.975], [0.200, 1.000],
+  [0.800, 1.000], [0.915, 0.985], [0.962, 0.945], [0.988, 0.878], [1.000, 0.800],
 ];
 
 /** 車身下緣（未含輪拱）：前後有進/離去角 */
@@ -504,4 +517,410 @@ function stationUs(sp, uniform, perArch) {
     }
   }
   return [...set].sort((a, b) => a - b);
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 4. 第三層｜程序生成 3D 車身
+ *    回傳依材質分桶的 {geo, matrix} 清單，LOD0 與 Fleet 共用同一份造型程式碼。
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const hwAt = (u, sp) => pw(u, HW_TABLE) * sp.W / 2;
+const lowTopAt = (u, sp) => pw(u, lowerTopTable(sp)) * sp.H;
+const ghwAt = (u, sp) => {
+  const R = sp.roof;
+  const narrow = pw(u, [
+    [R.wsBase, 0.860], [R.roofFront, 0.985], [0.550, 1.000],
+    [R.roofRear, 0.962], [R.tail, 0.800],
+  ]);
+  return hwAt(u, sp) * R.ghw * narrow;
+};
+
+/** 車身側面「表面補片」：永遠與烤漆面共形，用來做頭尾燈、細條紋、車門線 */
+function sidePatch(THREE, sp, u0, u1, yLo, yHi, side, outset, steps = 6, r = 0.008) {
+  const st = [];
+  for (let i = 0; i <= steps; i++) {
+    const u = lerp(u0, u1, i / steps);
+    const hw = hwAt(u, sp) * outset;
+    st.push({
+      z: -sp.L / 2 + u * sp.L, hwBot: hw, hwTop: hw,
+      yBot: typeof yLo === 'function' ? yLo(u) : yLo,
+      yTop: typeof yHi === 'function' ? yHi(u) : yHi,
+      rTop: r, rBot: r,
+    });
+  }
+  return sweepGeometry(THREE, st, { iRange: side > 0 ? [29, 5] : [13, 21] });
+}
+
+/**
+ * 建構一台車的所有幾何，依材質分桶。
+ * detail: 'high'（getCarMesh）｜'low'（Fleet 的 InstancedMesh 原型）
+ */
+function buildCarGeometry(THREE, sp, detail = 'high') {
+  const hi = detail === 'high';
+  const B = { paint: [], trim: [], glass: [], lamp: [], stripe: [], core: [], tire: [], wheel: [] };
+  const M = () => new THREE.Matrix4();
+  const T = (x, y, z) => M().makeTranslation(x, y, z);
+  const { L, W, H, belt, roofY, rocker, wheelR, archR, axleFZ, axleRZ } = sp;
+  const R = sp.roof;
+
+  /* ── 4.1 車體下段（含真正的輪拱開口） ───────────────────────────────── */
+  const us = stationUs(sp, hi ? 40 : 24, hi ? 13 : 6);
+  const lower = us.map((u) => {
+    const hw = hwAt(u, sp);
+    return {
+      z: -L / 2 + u * L,
+      hwBot: hw * 0.985, hwTop: hw,
+      yBot: lowerBotAt(u, sp), yTop: lowTopAt(u, sp),
+      rTop: 0.085, rBot: 0.030,
+    };
+  });
+  B.paint.push({ geo: sweepGeometry(THREE, lower, { chamfer: 0.0025 }) });
+
+  /* ── 4.2 底盤／輪拱內側（深色，從輪拱開口看進去就是它） ───────────── */
+  const coreSt = [];
+  for (let i = 0; i <= (hi ? 10 : 4); i++) {
+    const t = i / (hi ? 10 : 4);
+    const z = lerp(-L * 0.435, L * 0.435, t);
+    coreSt.push({ z, hwBot: W * 0.355, hwTop: W * 0.375, yBot: H * 0.082, yTop: belt * 0.985, rTop: 0.05, rBot: 0.04 });
+  }
+  B.core.push({ geo: sweepGeometry(THREE, coreSt, { chamfer: 0.002 }) });
+
+  // 輪拱內襯（上半圓筒，軸向 X）—— 讓凹陷有真實深度，不是貼圖
+  for (const az of [axleFZ, axleRZ]) {
+    for (const s of [1, -1]) {
+      const wellLen = sp.tireHalfW * 2 + 0.11;
+      const g = new THREE.CylinderGeometry(archR * 0.99, archR * 0.99, wellLen, hi ? 18 : 10, 1, true, 0, Math.PI);
+      g.rotateZ(Math.PI / 2);
+      B.core.push({ geo: g, matrix: T(s * (sp.wheelX * 0.90), wheelR, az) });
+    }
+  }
+
+  /* ── 4.3 車艙玻璃殼（前擋／側窗／後擋一體成形，形狀由車頂線決定） ── */
+  const gUs = [];
+  const gSteps = hi ? 26 : 14;
+  for (let i = 0; i <= gSteps; i++) gUs.push(lerp(R.wsBase, R.tail, i / gSteps));
+  const gh = gUs.map((u) => {
+    const hw = ghwAt(u, sp);
+    return {
+      z: -L / 2 + u * L, hwBot: hw, hwTop: hw * 0.955,
+      yBot: belt * 0.952, yTop: Math.max(roofTopAt(u, sp) * H, belt * 0.96 + 0.004),
+      rTop: 0.155, rBot: 0.020,
+    };
+  });
+  B.glass.push({ geo: sweepGeometry(THREE, gh, { chamfer: 0.002 }) });
+
+  /* ── 4.4 車頂板（蓋住玻璃殼頂部，留下前擋／後擋／側窗） ─────────── */
+  const capU0 = R.roofFront - 0.022, capU1 = R.roofRear + 0.028;
+  const capSt = [];
+  const capSteps = hi ? 14 : 7;
+  for (let i = 0; i <= capSteps; i++) {
+    const u = lerp(capU0, capU1, i / capSteps);
+    const yT = roofTopAt(u, sp) * H + 0.005;
+    const hw = ghwAt(u, sp) * 1.014;
+    capSt.push({ z: -L / 2 + u * L, hwBot: hw, hwTop: hw * 0.97, yBot: yT - 0.088, yTop: yT, rTop: 0.10, rBot: 0.02 });
+  }
+  B.paint.push({ geo: sweepGeometry(THREE, capSt, { chamfer: 0.0025 }) });
+
+  /* ── 4.5 A／B／C 柱（黑色柱） ───────────────────────────────────── */
+  if (hi) {
+    const pillarSweep = (u0, u1, side, halfX, halfY) => {
+      const st = [];
+      for (let i = 0; i <= 9; i++) {
+        const u = lerp(u0, u1, i / 9);
+        const yc = roofTopAt(u, sp) * H - halfY - 0.006;
+        st.push({
+          z: -L / 2 + u * L, hwBot: halfX, hwTop: halfX,
+          yBot: yc - halfY, yTop: yc + halfY, rTop: 0.006, rBot: 0.006,
+          cx: side * ghwAt(u, sp) * 0.992,
+        });
+      }
+      return sweepGeometry(THREE, st, { chamfer: 0.002 });
+    };
+    for (const s of [1, -1]) {
+      B.trim.push({ geo: pillarSweep(R.wsBase + 0.004, R.roofFront + 0.012, s, 0.019, 0.031) }); // A 柱
+      B.trim.push({ geo: pillarSweep(R.roofRear - 0.012, R.tail - 0.004, s, 0.021, 0.033) });    // C 柱
+      // B 柱（近垂直，用圓角盒 + 傾角）
+      const uB = 0.545;
+      const yTop = roofTopAt(uB, sp) * H - 0.02, yBot = belt * 0.97;
+      const bp = roundedBoxGeo(THREE, 0.020, yTop - yBot, 0.058, 0.004);
+      B.trim.push({ geo: bp, matrix: T(s * ghwAt(uB, sp) * 0.996, (yTop + yBot) / 2, -L / 2 + uB * L) });
+    }
+  }
+
+  /* ── 4.6 輪拱外緣（略突出車身的護板） ───────────────────────────── */
+  for (const az of [axleFZ, axleRZ]) {
+    for (const s of [1, -1]) {
+      const flare = new THREE.TorusGeometry(archR * 1.005, 0.023, hi ? 8 : 5, hi ? 24 : 12, Math.PI);
+      flare.rotateY(Math.PI / 2);
+      B.trim.push({ geo: flare, matrix: T(s * (W / 2 * 0.982), wheelR, az) });
+    }
+  }
+
+  /* ── 4.7 前臉：水箱罩、下進氣、保險桿、霧燈 ─────────────────────── */
+  const noseZ = -L / 2;
+  const grille = roundedBoxGeo(THREE, W * 0.50, H * 0.105, 0.085, 0.012);
+  B.trim.push({ geo: grille, matrix: T(0, H * 0.385, noseZ + 0.033) });
+  const intake = roundedBoxGeo(THREE, W * 0.64, H * 0.085, 0.075, 0.014);
+  B.trim.push({ geo: intake, matrix: T(0, H * 0.205, noseZ + 0.030) });
+  const fbump = roundedBoxGeo(THREE, W * 0.80, H * 0.075, 0.14, 0.020);
+  B.trim.push({ geo: fbump, matrix: T(0, H * 0.128, noseZ + 0.075) });
+  if (hi) {
+    for (let i = 0; i < 4; i++) {
+      const sl = roundedBoxGeo(THREE, W * 0.465, 0.013, 0.030, 0.004);
+      B.trim.push({ geo: sl, matrix: T(0, H * 0.385 + (i - 1.5) * H * 0.026, noseZ - 0.008) });
+    }
+    for (const s of [1, -1]) {
+      const fog = new THREE.CylinderGeometry(0.046, 0.046, 0.05, 14);
+      fog.rotateX(Math.PI / 2);
+      B.lamp.push({ geo: fog, matrix: T(s * W * 0.295, H * 0.185, noseZ + 0.012) });
+      const ring = new THREE.TorusGeometry(0.058, 0.012, 6, 16);
+      B.trim.push({ geo: ring, matrix: T(s * W * 0.295, H * 0.185, noseZ + 0.010) });
+    }
+  }
+
+  /* ── 4.8 頭燈／尾燈（正面燈殼 + 沿葉子板包覆的共形補片） ───────── */
+  for (const s of [1, -1]) {
+    const hl = roundedBoxGeo(THREE, W * 0.185, H * 0.075, 0.075, 0.014);
+    B.lamp.push({ geo: hl, matrix: T(s * W * 0.275, H * 0.435, noseZ + 0.024) });
+    B.lamp.push({ geo: sidePatch(THREE, sp, 0.004, 0.052, H * 0.400, H * 0.470, s, 1.006, hi ? 6 : 3) });
+    const tl = roundedBoxGeo(THREE, W * 0.165, H * 0.095, 0.075, 0.014);
+    B.lamp.push({ geo: tl, matrix: T(s * W * 0.295, belt * 0.845, L / 2 - 0.024) });
+    B.lamp.push({ geo: sidePatch(THREE, sp, 0.948, 0.996, belt * 0.795, belt * 0.895, s, 1.006, hi ? 6 : 3) });
+  }
+  if (hi) {
+    const drl = roundedBoxGeo(THREE, W * 0.60, 0.016, 0.030, 0.005);
+    B.lamp.push({ geo: drl, matrix: T(0, H * 0.470, noseZ - 0.004) });
+    const rbump = roundedBoxGeo(THREE, W * 0.78, H * 0.075, 0.13, 0.020);
+    B.trim.push({ geo: rbump, matrix: T(0, H * 0.130, L / 2 - 0.072) });
+    const plate = roundedBoxGeo(THREE, 0.34, 0.16, 0.035, 0.006);
+    B.trim.push({ geo: plate, matrix: T(0, H * 0.265, L / 2 - 0.012) });
+  }
+
+  /* ── 4.9 車側：下緣護板、品牌識別色細條紋、車門線、把手、後視鏡 ── */
+  for (const s of [1, -1]) {
+    B.trim.push({ geo: sidePatch(THREE, sp, 0.085, 0.915, H * 0.112, H * 0.176, s, 1.004, hi ? 10 : 5) });
+    B.stripe.push({ geo: sidePatch(THREE, sp, 0.135, 0.880, H * 0.186, H * 0.204, s, 1.006, hi ? 10 : 5, 0.005) });
+    if (!hi) continue;
+    // C 柱上的品牌色小塊（克制，不塗滿）
+    const chip = roundedBoxGeo(THREE, 0.012, 0.085, 0.045, 0.004);
+    B.stripe.push({ geo: chip, matrix: T(s * ghwAt(R.roofRear - 0.02, sp) * 1.002, belt * 1.10, -L / 2 + (R.roofRear - 0.02) * L) });
+    // 車門線（細線，非布林凹槽）
+    for (const ud of [0.312, 0.548, 0.782]) {
+      B.trim.push({
+        geo: sidePatch(THREE, sp, ud - 0.004, ud + 0.004,
+          (u) => lowerBotAt(u, sp) + 0.012, (u) => lowTopAt(u, sp) - 0.006, s, 1.003, 2, 0.004),
+      });
+    }
+    // 門把
+    for (const uh of [0.430, 0.665]) {
+      const hd = roundedBoxGeo(THREE, 0.026, 0.030, 0.135, 0.006);
+      B.trim.push({ geo: hd, matrix: T(s * (hwAt(uh, sp) + 0.010), belt * 0.905, -L / 2 + uh * L) });
+    }
+    // 後視鏡（含鏡臂）
+    const um = R.wsBase + 0.028;
+    const mx = hwAt(um, sp), mz = -L / 2 + um * L;
+    const arm = roundedBoxGeo(THREE, 0.055, 0.026, 0.042, 0.008);
+    B.trim.push({ geo: arm, matrix: T(s * (mx + 0.028), belt * 1.020, mz) });
+    const hous = roundedBoxGeo(THREE, 0.075, 0.082, 0.155, 0.022);
+    B.paint.push({ geo: hous, matrix: T(s * (mx + 0.085), belt * 1.038, mz + 0.012) });
+    const mg = roundedBoxGeo(THREE, 0.062, 0.066, 0.010, 0.004);
+    B.glass.push({ geo: mg, matrix: T(s * (mx + 0.085), belt * 1.038, mz + 0.086) });
+  }
+
+  /* ── 4.10 車頂行李架（僅 comfort['車頂行李架'] 為 true） ───────── */
+  if (sp.hasRails) {
+    const uc = (R.roofFront + R.roofRear) / 2;
+    const railLen = (R.roofRear - R.roofFront) * L * 0.86;
+    for (const s of [1, -1]) {
+      const rail = roundedBoxGeo(THREE, 0.034, 0.028, railLen, 0.012);
+      B.trim.push({ geo: rail, matrix: T(s * ghwAt(uc, sp) * 0.86, roofTopAt(uc, sp) * H + 0.030, -L / 2 + uc * L) });
+      if (!hi) continue;
+      for (const f of [-0.36, 0.36]) {
+        const foot = roundedBoxGeo(THREE, 0.030, 0.030, 0.070, 0.008);
+        const uf = uc + f * (R.roofRear - R.roofFront);
+        B.trim.push({ geo: foot, matrix: T(s * ghwAt(uf, sp) * 0.86, roofTopAt(uf, sp) * H + 0.012, -L / 2 + uf * L) });
+      }
+    }
+  }
+
+  /* ── 4.11 天窗（僅 comfort['天窗'] 為 true，做在車頂玻璃） ─────── */
+  if (sp.hasSunroof) {
+    const usr = clamp((R.roofFront + R.roofRear) / 2 - 0.03, 0.3, 0.8);
+    const zr = -L / 2 + usr * L, yr = roofTopAt(usr, sp) * H;
+    const frame = roundedBoxGeo(THREE, ghwAt(usr, sp) * 1.18, 0.014, (R.roofRear - R.roofFront) * L * 0.52, 0.008);
+    B.trim.push({ geo: frame, matrix: T(0, yr + 0.006, zr) });
+    const glass = roundedBoxGeo(THREE, ghwAt(usr, sp) * 1.06, 0.012, (R.roofRear - R.roofFront) * L * 0.46, 0.006);
+    B.glass.push({ geo: glass, matrix: T(0, yr + 0.014, zr) });
+  }
+
+  /* ── 4.12 四個輪子（輪胎 LatheGeometry + 真實幅條輪圈） ────────── */
+  const tg = tireGeometry(THREE, wheelR, sp.tireHalfW, hi ? 30 : 14);
+  const rg = rimGeometry(THREE, wheelR, sp.tireHalfW, sp.spokes);
+  for (const az of [axleFZ, axleRZ]) {
+    for (const s of [1, -1]) {
+      const m = T(s * sp.wheelX, wheelR, az).multiply(M().makeRotationY(s > 0 ? 0 : Math.PI));
+      B.tire.push({ geo: tg.clone(), matrix: m.clone() });
+      B.wheel.push({ geo: rg.clone(), matrix: m.clone() });
+      if (hi) {
+        const disc = new THREE.CylinderGeometry(wheelR * 0.50, wheelR * 0.50, 0.020, 18);
+        disc.rotateZ(Math.PI / 2);
+        B.core.push({ geo: disc, matrix: T(s * (sp.wheelX - sp.tireHalfW * 0.35), wheelR, az) });
+      }
+    }
+  }
+  tg.dispose(); rg.dispose();
+
+  return B;
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 5. 影像管線（第一層／第二層共用）：去背羽化 + 隨角度變形的落地陰影
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+const SKELETON_STYLE_ID = 'b4-carmodels-skeleton-style';
+
+function ensureSkeletonStyle() {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById(SKELETON_STYLE_ID)) return;
+  const st = document.createElement('style');
+  st.id = SKELETON_STYLE_ID;
+  // 骨架屏：灰色佔位方塊 + 極慢呼吸（只動 opacity / transform，不是 spinner）
+  st.textContent = `
+@keyframes b4-breathe { 0%,100% { opacity:.34; transform:scale(1); } 50% { opacity:.62; transform:scale(1.012); } }
+.b4-spin-wrap { position:relative; width:100%; height:100%; overflow:hidden; touch-action:none;
+  background:#F2F3F5; cursor:grab; }
+.b4-spin-wrap.b4-drag { cursor:grabbing; }
+.b4-spin-canvas { display:block; width:100%; height:100%; }
+.b4-skel { position:absolute; inset:8%; border-radius:14px;
+  background:linear-gradient(102deg,#DFE1E5 0%,#E8EAED 44%,#DADDE2 100%);
+  animation:b4-breathe 3400ms ${EASE.region} infinite; will-change:opacity,transform; }
+.b4-skel-b { position:absolute; border-radius:999px; background:#D3D6DB; opacity:.75;
+  animation:b4-breathe 3400ms ${EASE.region} infinite; }
+.b4-angles { position:absolute; left:50%; bottom:10px; transform:translateX(-50%);
+  display:flex; gap:6px; }
+.b4-angles button { font:500 12px/1 system-ui,-apple-system,"Noto Sans TC",sans-serif;
+  padding:6px 10px; border:1px solid #C9CDD3; border-radius:999px; background:#FBFBFC;
+  color:#3A3F46; cursor:pointer; transition:background 180ms ${EASE.micro}, color 180ms ${EASE.micro};
+  will-change:background,color; }
+.b4-angles button[aria-pressed="true"] { background:#3A3F46; color:#F7F8F9; border-color:#3A3F46; }
+`;
+  document.head.appendChild(st);
+}
+
+/** 載入一張圖（同源）。失敗回 null，不丟例外。 */
+function loadImage(url) {
+  return new Promise((resolve) => {
+    if (typeof Image === 'undefined') { resolve(null); return; }
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+
+/**
+ * ★ 去背與羽化：白底車圖 → 具 alpha 的 canvas。**絕對不可留下白色方框。**
+ * - 以四角取樣判斷是否真的是近白底；不是就原圖直出（可能本來就有 alpha）。
+ * - alpha 用 soft threshold（不是硬切），再對 alpha 做兩次 3×3 盒狀模糊做羽化。
+ * - 邊緣去白邊：對 0<alpha<1 的像素做反預乘，把殘留的背景色扣掉。
+ */
+function keyOutWhite(img) {
+  if (typeof document === 'undefined') return null;
+  const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+  if (!w || !h) return null;
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const c = cv.getContext('2d', { willReadFrequently: true });
+  c.drawImage(img, 0, 0, w, h);
+  let data;
+  try { data = c.getImageData(0, 0, w, h); }
+  catch (e) { return { canvas: cv, keyed: false }; }   // canvas 被污染：誠實退回原圖
+  const d = data.data;
+  const at = (x, y) => { const i = (y * w + x) * 4; return [d[i], d[i + 1], d[i + 2]]; };
+  const corners = [at(1, 1), at(w - 2, 1), at(1, h - 2), at(w - 2, h - 2)];
+  const bg = [0, 1, 2].map((k) => corners.reduce((s, p) => s + p[k], 0) / 4);
+  const bgLum = 0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2];
+  if (bgLum < 232) return { canvas: cv, keyed: false };   // 不是白底，不動它
+
+  const N = w * h;
+  const alpha = new Float32Array(N);
+  const T0 = 0.040, T1 = 0.150;                            // soft threshold
+  for (let i = 0; i < N; i++) {
+    const o = i * 4;
+    const dist = Math.max(Math.abs(d[o] - bg[0]), Math.abs(d[o + 1] - bg[1]), Math.abs(d[o + 2] - bg[2])) / 255;
+    const t = clamp((dist - T0) / (T1 - T0), 0, 1);
+    alpha[i] = t * t * (3 - 2 * t);
+  }
+  // 羽化：兩次可分離盒狀模糊（半徑 1）
+  const tmp = new Float32Array(N);
+  for (let pass = 0; pass < 2; pass++) {
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      tmp[i] = (alpha[i] + alpha[y * w + Math.max(0, x - 1)] + alpha[y * w + Math.min(w - 1, x + 1)]) / 3;
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      alpha[i] = (tmp[i] + tmp[Math.max(0, y - 1) * w + x] + tmp[Math.min(h - 1, y + 1) * w + x]) / 3;
+    }
+  }
+  for (let i = 0; i < N; i++) {
+    const a = alpha[i], o = i * 4;
+    if (a < 0.996 && a > 0.004) {
+      for (let k = 0; k < 3; k++) d[o + k] = clamp((d[o + k] - bg[k] * (1 - a)) / a, 0, 255);
+    }
+    d[o + 3] = Math.round(clamp(a, 0, 1) * 255);
+  }
+  c.putImageData(data, 0, 0);
+  return { canvas: cv, keyed: true };
+}
+
+/**
+ * ★ 落地陰影：形狀隨旋轉角度改變 —— 正側面最長、正前方最短。
+ * 沒有陰影，車會像貼紙浮在空中。
+ */
+function drawGroundShadow(c, cw, ch, angle, scale) {
+  const side = Math.abs(Math.sin(angle));               // 1 = 正側面，0 = 正前/正後
+  const wRatio = 0.40 + 0.34 * side;                    // 側面最長
+  const hRatio = 0.088 - 0.020 * side;                  // 側面較扁
+  const cx = cw * 0.5 + Math.cos(angle) * cw * 0.012;
+  const cy = ch * 0.795;
+  const rx = cw * wRatio * scale, ry = ch * hRatio * scale;
+  c.save();
+  c.translate(cx, cy);
+  c.scale(1, ry / rx);
+  const g = c.createRadialGradient(0, 0, rx * 0.12, 0, 0, rx);
+  g.addColorStop(0.00, 'rgba(28,32,38,0.40)');
+  g.addColorStop(0.45, 'rgba(28,32,38,0.22)');
+  g.addColorStop(0.78, 'rgba(28,32,38,0.07)');
+  g.addColorStop(1.00, 'rgba(28,32,38,0.00)');
+  c.fillStyle = g;
+  c.beginPath(); c.arc(0, 0, rx, 0, Math.PI * 2); c.fill();
+  c.restore();
+}
+
+/** 影格容器（預載 + 去背 + 骨架屏） */
+class FrameSet {
+  constructor(urls) {
+    this.urls = urls.slice();
+    this.canvases = new Array(urls.length).fill(null);
+    this.loaded = 0;
+    this.ready = false;
+    this.keyed = false;
+    this.failed = 0;
+  }
+  /** ★ 細節 1：第一次拖曳前把全部影格載完，否則轉到一半會卡 */
+  async preload(onProgress) {
+    const imgs = await Promise.all(this.urls.map(loadImage));
+    for (let i = 0; i < imgs.length; i++) {
+      if (!imgs[i]) { this.failed++; continue; }
+      const r = keyOutWhite(imgs[i]);
+      if (r) { this.canvases[i] = r.canvas; if (r.keyed) this.keyed = true; }
+      this.loaded++;
+      if (onProgress) onProgress(this.loaded / this.urls.length);
+    }
+    this.ready = this.loaded > 0;
+    return this.ready;
+  }
+  dispose() { this.canvases.length = 0; }
 }

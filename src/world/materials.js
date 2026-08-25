@@ -39,6 +39,12 @@
  *  - aoMap 一律不提供（three r152+ 的 aoMap 讀第二組 UV `uv1`，B1 的幾何不保證有）。
  *    texture(name).aoMap 一律為 null。
  *  - grass.blade 不附 alphaMap（怕 B1 已經用葉片形狀的幾何，再切一次會破圖）。
+ *  - 規格中深度極淺的法線（wall.paint 橘皮 0.02mm、frame.wood 木紋 0.05mm、
+ *    car.paint 橘皮 0.015mm、frame.glass / car.glass 的波紋）在 1–4 mm/texel 的
+ *    取樣密度下，斜率只有 1/255 階，法線貼圖實質上是平的（這是物理必然，不是 bug）。
+ *    這幾項的「橘皮／木紋」在畫面上是靠 **roughness map 的光澤斑駁** 呈現的，
+ *    法線貼圖仍然照樣產生並掛上，只是視覺貢獻趨近於零。灰階檢驗時請看反光斑駁，
+ *    不要期待看到凹凸。
  *
  * 效能備忘：
  *  - 貼圖總量（37 個全部生成、含 mipmap 估計）約 98 MB，在 120 MB 預算內；
@@ -525,7 +531,7 @@ export function createMaterialLibrary(ctx) {
   defs['wall.paint'] = function () {
     const S = 512, tile = [1.2, 1.2];
     const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
-    const low = fbm(4101, 3, 3), peel = fbm(4102, 26, 3), peel2 = fbm(4103, 52, 2);
+    const low = fbm(4101, 3, 3), peel = fbm(4102, 72, 3), peel2 = fbm(4103, 150, 2);
     const rn = mulberry32(4104);
     const base = hx(0xFCFCFA);
     for (let y = 0; y < S; y++) {
@@ -865,7 +871,7 @@ export function createMaterialLibrary(ctx) {
         const tire = clamp01((lane1 + lane2) * (0.6 + 0.4 * sampleField(fMid, QM, u * 0.3, v)));
 
         // ★ 油漬：深色不規則斑塊
-        const oil = Math.pow(clamp01((sampleField(fOil, QL, u, v) - 0.615) * 4.6), 1.5);
+        const oil = Math.pow(clamp01((sampleField(fOil, QL, u, v) - 0.58) * 5.5), 1.2);
         if (oil > 0.001) {
           const k = oil * 0.9;
           r8 = lerp(r8, 42, k); g8 = lerp(g8, 42, k); b8 = lerp(b8, 44, k);
@@ -876,7 +882,7 @@ export function createMaterialLibrary(ctx) {
 
         // Roughness：基準 0.88 / 輪胎 0.72 / 油漬 0.55 / 邊緣 0.93
         let rough = 0.88 + (rn() - 0.5) * 0.03 - gShape * 0.02;
-        rough = lerp(rough, 0.72, tire * 0.85);
+        rough = lerp(rough, 0.72, tire);
         rough = lerp(rough, 0.55, oil);
         rough = lerp(rough, 0.93, Math.pow(clamp01((sampleField(fEdge, QL, u, v) - 0.6) * 3.0), 1.5) * 0.7);
         R[p] = rough;
@@ -998,7 +1004,7 @@ export function createMaterialLibrary(ctx) {
             const pp = yy * S + xx, ii = pp * 4;
             const kk = fade * fx * fx;
             A[ii] *= (1 - kk * 0.30); A[ii + 1] *= (1 - kk * 0.29); A[ii + 2] *= (1 - kk * 0.27);
-            R[pp] = lerp(R[pp], 0.78, kk);          // 水漬處 0.78
+            R[pp] = lerp(R[pp], 0.78, clamp01(kk * 2.4));   // 水漬處 0.78
           }
         }
       }
@@ -1232,6 +1238,7 @@ export function createMaterialLibrary(ctx) {
     const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
     const rn = mulberry32(o.seed);
     const low = fbm(o.seed + 3, 4, 3), mid = fbm(o.seed + 7, 16, 3), mud = fbm(o.seed + 13, 5, 3);
+    const grain = o.grainCells ? worley(o.seed + 21, o.grainCells) : null;
     const base = hx(o.color);
     for (let y = 0; y < S; y++) {
       const v = y / S;
@@ -1243,8 +1250,10 @@ export function createMaterialLibrary(ctx) {
         const m = (1 - smooth01(v / 0.30)) * Math.pow(clamp01(mud(u, v) + 0.15), 1.3);
         r8 = lerp(r8, 104, m * 0.62); g8 = lerp(g8, 92, m * 0.62); b8 = lerp(b8, 74, m * 0.62);
         A[i] = r8; A[i + 1] = g8; A[i + 2] = b8; A[i + 3] = 255;
-        R[p] = o.rough + (mid(u, v) - 0.5) * 0.06 + (rn() - 0.5) * 0.03 + m * 0.10;
-        H[p] = clamp01(0.6 + (mid(u, v) - 0.5) * o.relief + (low(u, v) - 0.5) * 0.25);
+        let gs = 0;
+        if (grain) { const gw = grain(u, v); gs = clamp01(1 - gw.f1 / 0.72) * (0.6 + 0.4 * gw.id); }
+        R[p] = o.rough + (mid(u, v) - 0.5) * 0.06 + (rn() - 0.5) * 0.03 + m * 0.10 - gs * 0.03;
+        H[p] = clamp01(0.45 + gs * 0.40 + (mid(u, v) - 0.5) * o.relief + (low(u, v) - 0.5) * 0.25);
       }
     }
     // ★ 輪胎擦撞的黑色痕跡（集中在中段高度）
@@ -1266,7 +1275,7 @@ export function createMaterialLibrary(ctx) {
   defs['barrier.concrete'] = function () {
     const b = bakeBarrier({
       size: 512, tile: [2.0, 1.0], seed: 5601, color: 0xE4E2DC,
-      rough: 0.90, mottle: 0.07, relief: 0.5, scuffs: 16,
+      rough: 0.90, mottle: 0.07, relief: 0.5, scuffs: 16, grainCells: 130,
     });
     return make('barrier.concrete', {
       size: b.size, tile: b.tile, A: b.A, R: b.R, H: b.H, heightMM: 2.5, repeat: [4, 1],
@@ -1435,7 +1444,7 @@ export function createMaterialLibrary(ctx) {
         // ★ 邊緣被踩踏處更亮（貼圖四周）
         const edge = 1 - smooth01(Math.min(Math.min(u, 1 - u), Math.min(v, 1 - v)) / 0.12);
         R[p] = lerp(o.rough, o.roughEdge, edge) + (low(u, v) - 0.5) * 0.05 + (rn() - 0.5) * 0.03 - cs * 0.03;
-        H[p] = clamp01(0.55 + cs * 0.30 + cs2 * 0.18 + (low(u, v) - 0.5) * 0.20);
+        H[p] = clamp01(0.48 + cs * 0.44 + cs2 * 0.24 + (low(u, v) - 0.5) * 0.20);
       }
     }
     return { A, R, H, size: S, tile };
@@ -1444,20 +1453,20 @@ export function createMaterialLibrary(ctx) {
   defs['court.platform'] = function () {
     const b = bakeTerrazzo({
       size: 512, tile: [2.0, 2.0], seed: 6101, base: 0xFAFAF7,
-      chipCells: 70, chipLo: 196, chipHi: 246, mottle: 0.03, rough: 0.68, roughEdge: 0.50,
+      chipCells: 150, chipLo: 196, chipHi: 246, mottle: 0.03, rough: 0.68, roughEdge: 0.50,
     });
     return make('court.platform', {
-      size: b.size, tile: b.tile, A: b.A, R: b.R, H: b.H, heightMM: 1.0, repeat: [1, 1],
+      size: b.size, tile: b.tile, A: b.A, R: b.R, H: b.H, heightMM: 1.6, repeat: [1, 1],
       params: { roughness: 1.0, metalness: 0.0, color: 0xffffff },
     });
   };
   defs['court.stone'] = function () {
     const b = bakeTerrazzo({
       size: 512, tile: [1.2, 1.2], seed: 6102, base: 0xE6E4DE,
-      chipCells: 55, chipLo: 150, chipHi: 226, mottle: 0.06, rough: 0.70, roughEdge: 0.54,
+      chipCells: 110, chipLo: 150, chipHi: 226, mottle: 0.06, rough: 0.70, roughEdge: 0.54,
     });
     return make('court.stone', {
-      size: b.size, tile: b.tile, A: b.A, R: b.R, H: b.H, heightMM: 1.2, repeat: [5, 5],
+      size: b.size, tile: b.tile, A: b.A, R: b.R, H: b.H, heightMM: 1.6, repeat: [5, 5],
       params: { roughness: 1.0, metalness: 0.0, color: 0xffffff },
     });
   };
@@ -1734,7 +1743,7 @@ export function createMaterialLibrary(ctx) {
         // 車床紋（同心細紋）
         const cx = u - 0.5, cy = v - 0.5;
         const r = Math.sqrt(cx * cx + cy * cy);
-        const lathe = Math.pow(1 - Math.abs(frac(r * 130) * 2 - 1), 2.0);
+        const lathe = Math.pow(1 - Math.abs(frac(r * 44) * 2 - 1), 2.0);
         const bd = Math.pow(clamp01((dustN(u, v) - 0.45) * 2.2), 1.4);   // 煞車粉塵
         const f = (0.90 + (low(u, v) - 0.5) * 0.06 - lathe * 0.05);
         let c = 214 * f;
@@ -1745,7 +1754,7 @@ export function createMaterialLibrary(ctx) {
       }
     }
     return make('car.wheel', {
-      size: S, tile, A, R, H, heightMM: 0.10, repeat: [1, 1],
+      size: S, tile, A, R, H, heightMM: 0.80, repeat: [1, 1],
       params: { roughness: 1.0, metalness: 0.80, color: 0xffffff, envMapIntensity: 1.2 },
     });
   };

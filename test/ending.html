@@ -1,0 +1,124 @@
+<!doctype html><meta charset="utf-8"><title>ending test — 結局</title>
+<style>html,body{margin:0;height:100%;background:#EDEEF0}#ui{position:fixed;inset:0;pointer-events:none}
+#ui>*{pointer-events:auto}
+#sc{position:fixed;left:16px;top:16px;z-index:20;max-width:300px;
+ font:12px/1.6 "Noto Sans TC",system-ui,sans-serif;background:rgba(247,248,250,.96);
+ border:1px solid #D5DAE1;padding:12px 14px;color:#1B1E23}
+#sc h4{margin:0 0 8px;font-size:11px;letter-spacing:.2em;color:#7A8290;font-weight:400}
+#sc button{display:block;width:100%;text-align:left;font:inherit;margin:0 0 6px;background:#fff;
+ border:1px solid #CDD4DD;padding:6px 9px;cursor:pointer;
+ transition:transform 170ms cubic-bezier(0.32,0.72,0.28,1),box-shadow 170ms cubic-bezier(0.32,0.72,0.28,1)}
+#sc button:hover{transform:translateY(-1px) scale(1.01);box-shadow:0 6px 14px rgba(27,30,35,.10)}
+#sc small{color:#8A92A0}</style>
+<script type="importmap">{"imports":{
+ "three":"../vendor/three/build/three.module.js",
+ "three/addons/":"../vendor/three/addons/"}}</script>
+<div id="ui"></div>
+<div id="sc"><h4>B8 · 結局　情境切換</h4><div id="btns"></div>
+<small>每個按鈕會塞一組假的 STATE.visited / STATE.stances / chosenCarId / weights，
+再重新 show() 一次，讓每一條分支都能單獨檢視。</small></div>
+<script type="module">
+import * as THREE from 'three';
+import { makeTestCtx } from '../src/testkit.js';   // 主代理於第 3 階段提供
+import { createEnding } from '../src/rooms/ending.js';
+import { STATE, ROOMS } from '../src/contract.js';
+
+const ctx = await makeTestCtx({ mount: document.body, ui: document.getElementById('ui') });
+const ending = createEnding(ctx);
+if (ctx.startLoop) ctx.startLoop(() => {});
+
+const min = (m) => m * 60000;
+const EQUAL = { price:1, safety:1, equip:1, fuel:1, power:1, space:1, park:1, tax:1, warranty:1, dealer:1 };
+const SPREAD = { price:6, safety:8, equip:2, fuel:3, power:1, space:2, park:4, tax:2, warranty:5, dealer:3 };
+
+function setState({ visited = {}, stances = [], chosen = null, weights = EQUAL, alive = null, slot = null }) {
+  STATE.visited = visited;
+  STATE.stances = stances;
+  STATE.chosenCarId = chosen;
+  STATE.weights = { ...weights };
+  if (alive) STATE.alive = alive;
+  if (slot) STATE.slot = slot;
+  ending.hide();
+  setTimeout(() => ending.show(), 60);
+}
+
+// 立場物件的形狀與 room6_court.js 寫進 STATE.stances 的一致
+const stance = (id, label, aspect, eliminated) => ({ id, label, aspect, eliminated, usedAt: Date.now() });
+const ids = (pred) => ctx.cars.filter(pred).map(c => c.id);
+const isHy = (c) => /Hybrid|e:HEV/i.test(c.trim);
+
+const SCENES = [
+  ['① 只泡在賽道（法庭、車位廳都沒去）', () => setState({
+    visited: {
+      [ROOMS.GALLERY]:    { enters: 2, ms: min(3.1) },
+      [ROOMS.VOID]:       { enters: 1, ms: min(1.4) },
+      [ROOMS.FIVE_YEARS]: { enters: 1, ms: min(2.2) },
+      [ROOMS.CIRCUIT]:    { enters: 4, ms: min(11.2) },
+    },
+    stances: [stance('brand', '品牌可靠度 > 配備', '品牌可靠度', ids(c => c.dealer !== '多' && c.warranty !== '5年15萬公里'))],
+    chosen: 'cx-1',
+  })],
+  ['② 六廳全都去過（沒有「你沒去」那幾句）', () => setState({
+    visited: Object.fromEntries(Object.values(ROOMS).map((k, i) =>
+      [k, { enters: 1 + (i % 3), ms: min(2 + i * 0.9) }])),
+    stances: [stance('rearseat', '後座很少載人', '行李廂', []),
+              stance('lowmile', '我一年只開八千公里', '油耗', [])],
+    chosen: 'hv-3',
+  })],
+  ['③ 一個廳都沒進過（visited 全空）', () => setState({
+    visited: {}, stances: [], chosen: 'yc-1',
+  })],
+  ['④ 唯一一個「為了守住它而說」的立場', () => setState({
+    visited: { [ROOMS.COURT]: { enters: 3, ms: min(9) }, [ROOMS.GALLERY]: { enters: 1, ms: min(4) } },
+    stances: [
+      stance('brand', '品牌可靠度 > 配備', '品牌可靠度', ids(c => /Mazda|Mitsubishi|MG|Volkswagen|Suzuki|Kia/.test(c.brand))),
+      stance('rearseat', '後座很少載人', '行李廂', []),
+      stance('hybrid', '我要油電', '油電', ids(c => !isHy(c))),
+    ],
+    chosen: 'cc-2',
+  })],
+  ['⑤ 三個立場全是為了守住它才說的', () => setState({
+    visited: { [ROOMS.COURT]: { enters: 2, ms: min(6) }, [ROOMS.CIRCUIT]: { enters: 1, ms: min(2) } },
+    stances: [
+      stance('brand', '品牌可靠度 > 配備', '品牌可靠度', ids(c => /Mazda|Mitsubishi|MG|Volkswagen|Suzuki|Kia/.test(c.brand))),
+      stance('rearseat', '後座很少載人', '行李廂', []),
+      stance('lowmile', '我一年只開八千公里', '油耗', []),
+    ],
+    chosen: 'vn-1',
+  })],
+  ['⑥ 被完全支配：沒有立場救得了它', () => setState({
+    visited: { [ROOMS.COURT]: { enters: 1, ms: min(5) } },
+    stances: [stance('rearseat', '後座很少載人', '行李廂', [])],
+    chosen: 'vn-4',
+  })],
+  ['⑦ 一個立場都沒說過', () => setState({
+    visited: { [ROOMS.GALLERY]: { enters: 5, ms: min(12) }, [ROOMS.PARKING]: { enters: 2, ms: min(3) } },
+    stances: [], chosen: 'st-1',
+  })],
+  ['⑧ 沒有被告（chosenCarId = null）', () => setState({
+    visited: { [ROOMS.VOID]: { enters: 2, ms: min(7) } }, stances: [], chosen: null,
+  })],
+  ['⑨ 前兩名分差 < 3%（等權重）', () => setState({
+    visited: { [ROOMS.CIRCUIT]: { enters: 3, ms: min(8) }, [ROOMS.GALLERY]: { enters: 1, ms: min(2) } },
+    stances: [], chosen: 'hv-4', weights: EQUAL,
+  })],
+  ['⑩ 前兩名分差 > 3%（偏重安全與價格）', () => setState({
+    visited: { [ROOMS.CIRCUIT]: { enters: 3, ms: min(8) }, [ROOMS.GALLERY]: { enters: 1, ms: min(2) } },
+    stances: [], chosen: 'st-1', weights: SPREAD,
+  })],
+  ['⑪ 行李廂原廠從未公布（HR-V）＋窄車位', () => setState({
+    visited: { [ROOMS.FIVE_YEARS]: { enters: 2, ms: min(6) } },
+    stances: [], chosen: 'hv-2', slot: { len: 440, wid: 200, hei: 190 },
+  })],
+];
+
+const box = document.getElementById('btns');
+for (const [label, fn] of SCENES) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.addEventListener('click', fn);
+  box.appendChild(b);
+}
+SCENES[0][1]();
+window.__ending = ending;
+</script>

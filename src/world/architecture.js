@@ -763,3 +763,608 @@ export function buildLot(ctx) {
   root.userData.cellField = DIMENSIONS.lot.cellField;
   return root;
 }
+
+/* ==========================================================================
+ * 5. 廳四 · 五年隧道（弧形拱頂，不是方盒）
+ * ========================================================================== */
+
+/** 隧道內壁輪廓：y → 半寬。起拱線以下是微弧側牆，以上是 R=4.5 的圓拱。 */
+function tunHalf(y) {
+  if (y <= T.SPRING) {
+    const k = 1 - y / T.SPRING;
+    return T.R - 0.12 * k * k;                       // 下方微微內收 → 是彎曲管壁，不是平牆
+  }
+  const dy = y - T.SPRING;
+  if (dy >= T.R) return 0;
+  return Math.sqrt(Math.max(T.R * T.R - dy * dy, 0));
+}
+function tunHalfOuter(y) {
+  const t = T.LINER_T;
+  if (y <= T.SPRING) return tunHalf(y) + t;
+  const dy = y - T.SPRING, RO = T.R + t;
+  if (dy >= RO) return 0;
+  return Math.sqrt(Math.max(RO * RO - dy * dy, 0));
+}
+
+export function buildTunnel(ctx) {
+  const THREE = ctx.THREE;
+  const root = new THREE.Group();
+  root.name = 'arch.tunnel';
+  const bag = GeoBag(ctx);
+
+  const total = T.SEG * T.SEGS;                       // 240 m
+  const roadHalf = (T.LANE * T.LANES) / 2;            // 3.5
+  const walkOuter = roadHalf + T.WALK_W;              // 4.4
+
+  /* ---- 5.1 襯砌：一段 40 m 的環形斷面 ExtrudeGeometry，用 InstancedMesh 循環 6 段 ---- */
+  const NP = 40;
+  const inner = [], outer = [];
+  for (let i = 0; i <= NP; i++) {
+    const y = (i / NP) * T.CROWN;
+    inner.push([tunHalf(y), y]);
+  }
+  const yOuterTop = T.SPRING + T.R + T.LINER_T;
+  for (let i = 0; i <= NP; i++) {
+    const y = -0.45 + (i / NP) * (yOuterTop + 0.45);
+    outer.push([tunHalfOuter(Math.max(y, 0)), y]);
+  }
+  const shape = new THREE.Shape();
+  shape.moveTo(outer[0][0], outer[0][1]);
+  for (let i = 1; i <= NP; i++) shape.lineTo(outer[i][0], outer[i][1]);
+  for (let i = NP - 1; i >= 0; i--) shape.lineTo(-outer[i][0], outer[i][1]);
+  shape.lineTo(-outer[0][0], outer[0][1]);
+  shape.closePath();
+  const hole = new THREE.Path();
+  hole.moveTo(-inner[0][0], inner[0][1]);
+  for (let i = 1; i <= NP; i++) hole.lineTo(-inner[i][0], inner[i][1]);
+  for (let i = NP - 1; i >= 0; i--) hole.lineTo(inner[i][0], inner[i][1]);
+  hole.lineTo(inner[0][0], inner[0][1]);
+  hole.closePath();
+  shape.holes.push(hole);
+  const liner = new THREE.ExtrudeGeometry(shape, {
+    depth: T.SEG, bevelEnabled: false, steps: 1, curveSegments: 1, UVGenerator: undefined,
+  });
+  liner.translate(0, 0, -T.SEG);                       // 一段從 -40 → 0
+  const linerInst = [];
+  for (let s = 0; s < T.SEGS; s++) linerInst.push({ p: [0, 0, -s * T.SEG] });
+  root.add(instanced(ctx, liner, 'tunnel.tile', linerInst));
+
+  /* ---- 5.2 側壁下方 1.2 m 的深色防污帶（跟著弧度走，內縮 6 mm 防 z-fighting）---- */
+  const bandRows = 8;
+  const grimeGeo = new THREE.BufferGeometry();
+  {
+    const pos = [], nor = [], uvv = [], idx = [];
+    const zSteps = 24;
+    for (const side of [-1, 1]) {
+      const base = pos.length / 3;
+      for (let r = 0; r <= bandRows; r++) {
+        const y = T.WALK_H + (r / bandRows) * T.GRIME_H;
+        const x = side * (tunHalf(y) - 0.006);
+        const y2 = T.WALK_H + ((r + 0.001) / bandRows) * T.GRIME_H;
+        const nx = -side, ny = (tunHalf(y2) - tunHalf(y)) * 0.0;
+        for (let k = 0; k <= zSteps; k++) {
+          const z = -total * (k / zSteps);
+          pos.push(x, y, z); nor.push(nx, ny, 0); uvv.push(-z / 2.0, r / bandRows);
+        }
+      }
+      for (let r = 0; r < bandRows; r++) {
+        for (let k = 0; k < zSteps; k++) {
+          const a = base + r * (zSteps + 1) + k, b = a + 1, c = a + zSteps + 1, d = c + 1;
+          if (side < 0) idx.push(a, c, b, b, c, d); else idx.push(a, b, c, b, d, c);
+        }
+      }
+    }
+    grimeGeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    grimeGeo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    grimeGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvv, 2));
+    grimeGeo.setIndex(idx);
+  }
+  const grime = new THREE.Mesh(grimeGeo, ctx.materials.get('tunnel.grime'));
+  grime.receiveShadow = true; grime.castShadow = false; grime.name = 'tunnel.grimeBand';
+  root.add(grime);
+
+  /* ---- 5.3 路面（雙線 3.5 m，橫向拱起排水）＋ 兩側高 15 cm 的人行通道 ---- */
+  const tunRoad = groundMesh(ctx, 'asphalt', roadHalf * 2, total, 16, 240,
+    (x, z) => T.CROWNSLOPE * (1 - Math.pow(clamp(x / roadHalf, -1, 1), 2)) + 0.004 * Math.sin(z * 0.5),
+    3.0);
+  tunRoad.position.z = -total / 2;
+  root.add(tunRoad);
+  for (const s of [-1, 1]) {
+    bag.add('concrete.wall', place(bevelBox(THREE, T.WALK_W, T.WALK_H + 0.10, total),
+      s * (roadHalf + T.WALK_W / 2), (T.WALK_H - 0.10) / 2, -total / 2));
+    bag.add('curb', place(bevelBox(THREE, 0.12, T.WALK_H + 0.10, total),
+      s * (roadHalf + 0.06), (T.WALK_H - 0.10) / 2 + 0.004, -total / 2));
+  }
+  // 車道線：中央雙黃線 + 兩側邊線（分段虛線，用 InstancedMesh）
+  const dash = bevelBox(THREE, 0.12, 0.006, 3.0, 0.0012);
+  const dashI = [];
+  for (let z = -2; z > -total; z -= 9) {
+    dashI.push({ p: [0, T.CROWNSLOPE + 0.005, z] });
+  }
+  root.add(instanced(ctx, dash, 'roadline', dashI, { cast: false }));
+  for (const s of [-1, 1]) {
+    bag.add('roadline', place(bevelBox(THREE, 0.15, 0.006, total - 1.0, 0.0012),
+      s * (roadHalf - 0.30), 0.006, -total / 2));
+  }
+
+  /* ---- 5.4 隧道燈具外殼（每 10 m 一組，只有外形，光源由 B3 提供）---- */
+  const lampParts = [
+    place(bevelBox(THREE, 0.30, 0.10, 1.40), 0, 0, 0),                       // 燈體
+    place(bevelBox(THREE, 0.26, 0.03, 1.30), 0, -0.062, 0),                  // 燈罩
+  ];
+  const lampGeo = mergeGeos(THREE, lampParts);
+  const braceGeo = mergeGeos(THREE, [
+    place(bevelBox(THREE, 0.05, 0.34, 0.05), 0, 0.22, -0.55),
+    place(bevelBox(THREE, 0.05, 0.34, 0.05), 0, 0.22, 0.55),
+    place(bevelBox(THREE, 0.06, 0.05, 1.30), 0, 0.40, 0),
+  ]);
+  const lampI = [], braceI = [];
+  const lampCount = Math.floor(total / T.LAMP_SPACING);
+  for (let i = 0; i < lampCount; i++) {
+    const z = -(i + 0.5) * T.LAMP_SPACING;
+    for (const s of [-1, 1]) {
+      const y = 4.55, x = s * (tunHalf(y) - 0.55);
+      lampI.push({ p: [x, y, z], r: [0, 0, -s * 0.55] });
+      braceI.push({ p: [x, y, z], r: [0, 0, -s * 0.55] });
+    }
+  }
+  root.add(instanced(ctx, lampGeo, 'track.head', lampI));
+  root.add(instanced(ctx, braceGeo, 'track.rail', braceI));
+  // 拱頂的排煙風機（真實隧道的識別物）
+  for (let i = 0; i < 4; i++) {
+    const z = -30 - i * 60;
+    bag.add('barrier.metal', place(new THREE.CylinderGeometry(0.55, 0.55, 2.20, 16), 0, T.CROWN - 0.95, z, 0, 0, Math.PI / 2));
+    for (const o of [-0.80, 0.80]) {
+      bag.add('track.rail', place(bevelBox(THREE, 0.06, 0.55, 0.06), 0, T.CROWN - 0.42, z + o));
+    }
+  }
+
+  /* ---- 5.5 每 50 m 的緊急電話 / 滅火器箱（門面內凹 12 cm，讀作凹槽）---- */
+  const nicheCount = Math.floor(total / T.NICHE_SPACING);
+  for (let i = 1; i <= nicheCount; i++) {
+    const z = -i * T.NICHE_SPACING;
+    const s = (i % 2 === 0) ? 1 : -1;
+    const y = 1.05, x = s * (tunHalf(y) - 0.02);
+    // 外框（凸出 4 cm）
+    bag.add('barrier.metal', place(bevelBox(THREE, 0.10, 1.28, 1.02), x - s * 0.03, y, z));
+    // 內凹的箱體門面（往牆內退 12 cm）
+    bag.add('tunnel.grime', place(bevelBox(THREE, 0.02, 1.10, 0.84), x - s * 0.14, y, z));
+    bag.add('barrier.metal', place(bevelBox(THREE, 0.06, 0.98, 0.72), x - s * 0.10, y, z));
+    bag.add('label.card', place(new THREE.PlaneGeometry(0.34, 0.24), x - s * 0.135, y + 0.42, z, 0, s * Math.PI / 2, 0));
+    bag.add('track.rail', place(new THREE.CylinderGeometry(0.018, 0.018, 0.12, 8), x - s * 0.12, y, z + 0.30, 0, 0, Math.PI / 2));
+    // 里程樁（人行道上）
+    bag.add('concrete.wall', place(bevelBox(THREE, 0.16, 0.55, 0.16), s * (roadHalf + 0.55), T.WALK_H + 0.275, z + 3.0));
+    bag.add('label.card', place(new THREE.PlaneGeometry(0.13, 0.16), s * (roadHalf + 0.55) - s * 0.082, T.WALK_H + 0.36, z + 3.0, 0, s * Math.PI / 2, 0));
+  }
+
+  /* ---- 5.6 洞口門架與兩端封口（明確邊界，不無限延伸）---- */
+  for (const [pz, sgn] of [[0.05, 1], [-total - 0.05, -1]]) {
+    bag.add('concrete.wall', place(bevelBox(THREE, T.IW + 3.0, T.CROWN + 1.4, 0.30), 0, (T.CROWN + 1.4) / 2 - 0.5, pz + sgn * 0.15));
+  }
+  // 反光導標（每 25 m，人行道側面）
+  const refl = bevelBox(THREE, 0.03, 0.09, 0.05, 0.0008);
+  const reflI = [];
+  for (let z = -5; z > -total; z -= 25) {
+    for (const s of [-1, 1]) reflI.push({ p: [s * (roadHalf + 0.10), 0.10, z] });
+  }
+  root.add(instanced(ctx, refl, 'track.reflector', reflI, { cast: false }));
+
+  const dc = bag.flush(root, { 'roadline': { cast: false } });
+  DIMENSIONS.tunnel.drawCallEstimate = dc + 7;
+  root.userData.dimensions = DIMENSIONS.tunnel;
+  root.userData.profileHalfWidthAt = tunHalf;
+  return root;
+}
+
+/* ==========================================================================
+ * 6. 廳五 · 賽道
+ * ========================================================================== */
+
+/**
+ * 中心線控制點 [x, y, z]。y = 路面高度。
+ * 佈局：長直線（-480 → +20，共 500 m，起跑線在 x = -20 → 起跑線前 460 m 直線）、
+ *       T1–T3、S1、東側髮夾、中段連續彎、S2、西側髮夾、回歸長直線的三個彎。
+ * 高低差：0 → 19.5 m。
+ */
+const CIRCUIT_POINTS = [
+  [-480,  0.0, -300],  // P0 起點（長直線頭）
+  [-380,  0.9, -300],
+  [-280,  2.0, -300],
+  [-180,  3.2, -300],
+  [ -80,  4.3, -300],
+  [  20,  5.2, -300],  // P5 長直線尾（起跑線在 x = -20）
+  [ 110,  5.9, -292],  // T1 右
+  [ 200,  7.4, -252],
+  [ 240,  9.0, -180],  // T2 右
+  [ 225, 11.0, -110],  // T3 左
+  [ 260, 13.0,  -50],  // T4 右
+  [ 330, 15.0,  -20],  // S1-a
+  [ 400, 16.2,  -45],  // S1-b（右）
+  [ 470, 17.0,  -20],  // S1-c（左）
+  [ 540, 18.0,   20],
+  [ 590, 19.0,   70],  // 髮夾 1 入
+  [ 585, 19.5,  130],
+  [ 530, 19.2,  155],  // 髮夾 1 頂點
+  [ 470, 18.2,  130],
+  [ 440, 16.6,   70],  // 髮夾 1 出
+  [ 370, 15.0,   40],
+  [ 290, 13.4,   55],  // T7 左
+  [ 215, 12.0,   95],
+  [ 140, 10.4,   90],  // S2-a
+  [  75,  9.0,  130],  // S2-b（左）
+  [   5,  8.0,  130],
+  [ -60,  7.0,   90],  // S2-c（右）
+  [-130,  6.0,   95],
+  [-215,  5.0,  140],  // 髮夾 2 入
+  [-285,  4.5,  150],
+  [-330,  4.0,  105],  // 髮夾 2 頂點
+  [-300,  3.5,   50],
+  [-235,  3.0,   20],  // 髮夾 2 出
+  [-330,  2.5,  -30],  // T10 左
+  [-430,  2.0,  -60],
+  [-520,  1.4, -120],  // T11
+  [-560,  0.8, -210],
+  [-545,  0.2, -275],  // T12 最後彎，回到長直線
+];
+
+function buildCircuitCurve(THREE) {
+  const pts = CIRCUIT_POINTS.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+  const curve = new THREE.CatmullRomCurve3(pts, true, 'centripetal', 0.5);
+  curve.arcLengthDivisions = 4000;
+  return curve;
+}
+
+/** 由曲率推 bank 角（2–8 度），並平滑成一張表。 */
+function buildBankTable(THREE, curve, N) {
+  const raw = new Float32Array(N);
+  const du = 1 / N, eps = 0.5 / N;
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const t1 = new THREE.Vector3(), t2 = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
+  const right = new THREE.Vector3(), dt = new THREE.Vector3();
+  const total = curve.getLength();
+  for (let i = 0; i < N; i++) {
+    const u = i * du;
+    curve.getPointAt((u - eps + 1) % 1, a);
+    curve.getPointAt(u, b);
+    curve.getPointAt((u + eps) % 1, c);
+    t1.subVectors(b, a).normalize();
+    t2.subVectors(c, b).normalize();
+    const ds = total * eps * 2;
+    dt.subVectors(t2, t1);
+    const kappa = dt.length() / Math.max(ds, 1e-6);
+    right.copy(t1).cross(up).normalize();
+    const sgn = Math.sign(dt.dot(right)) || 0;
+    const k01 = clamp((kappa - 0.0015) / (0.030 - 0.0015), 0, 1);
+    raw[i] = k01 <= 0 ? 0 : sgn * (R5.BANK_MIN + (R5.BANK_MAX - R5.BANK_MIN) * k01) * Math.PI / 180;
+  }
+  // 三次箱型平滑（±14 取樣 ≈ ±30 m）→ 進出彎的傾斜是漸變的，不會突然折起來
+  let cur = raw;
+  for (let pass = 0; pass < 3; pass++) {
+    const out = new Float32Array(N);
+    const rad = 14;
+    for (let i = 0; i < N; i++) {
+      let s = 0;
+      for (let k = -rad; k <= rad; k++) s += cur[(i + k + N * 2) % N];
+      out[i] = s / (rad * 2 + 1);
+    }
+    cur = out;
+  }
+  return cur;
+}
+
+export function buildCircuit(ctx) {
+  const THREE = ctx.THREE;
+  const root = new THREE.Group();
+  root.name = 'arch.circuit';
+  const bag = GeoBag(ctx);
+  const rnd = mulberry(0x1F0B2D55);
+
+  const curve = buildCircuitCurve(THREE);
+  const lengthM = curve.getLength();
+  const BN = 720;
+  const bankTable = buildBankTable(THREE, curve, BN);
+
+  const _p = new THREE.Vector3(), _t = new THREE.Vector3(), _u = new THREE.Vector3();
+
+  /** ★ B7 唯一的定位來源。u ∈ [0,1)，pos 即路面中心點。 */
+  function sampleAt(u) {
+    const uu = ((u % 1) + 1) % 1;
+    const pos = curve.getPointAt(uu);
+    const tangent = curve.getTangentAt(uu).normalize();
+    const f = uu * BN, i0 = Math.floor(f) % BN, i1 = (i0 + 1) % BN, fr = f - Math.floor(f);
+    const bank = bankTable[i0] * (1 - fr) + bankTable[i1] * fr;
+    const up = new THREE.Vector3(0, 1, 0).applyAxisAngle(tangent, bank);
+    return { pos, tangent, up, bank };
+  }
+
+  /* ---- 6.1 沿中心線取樣，建立路面框架 ---- */
+  const N = R5.SAMPLES;
+  const F = [];   // {pos, t, up, right, dist, bank}
+  let acc = 0;
+  for (let i = 0; i <= N; i++) {
+    const u = (i % N) / N;
+    const s = sampleAt(u);
+    const right = new THREE.Vector3().copy(s.tangent).cross(s.up).normalize();
+    if (i > 0) acc += s.pos.distanceTo(F[i - 1].pos);
+    F.push({ pos: s.pos, t: s.tangent, up: s.up, right, dist: acc, bank: s.bank });
+  }
+
+  /* ---- 6.2 路面（沿 curve 生成，寬 14 m，含 bank）---- */
+  function ribbon(matName, latFn, yFn, uvFn, filter) {
+    const pos = [], nor = [], uvv = [], idx = [];
+    const cols = latFn.length;
+    const tmp = new THREE.Vector3();
+    for (let i = 0; i <= N; i++) {
+      const f = F[i];
+      for (let c = 0; c < cols; c++) {
+        tmp.copy(f.pos).addScaledVector(f.right, latFn[c]).addScaledVector(f.up, yFn[c]);
+        pos.push(tmp.x, tmp.y, tmp.z);
+        nor.push(f.up.x, f.up.y, f.up.z);
+        const uvp = uvFn(c, f);
+        uvv.push(uvp[0], uvp[1]);
+      }
+    }
+    for (let i = 0; i < N; i++) {
+      if (filter && !filter(F[i], F[i + 1])) continue;
+      for (let c = 0; c < cols - 1; c++) {
+        const a = i * cols + c, b = a + 1, d = a + cols, e = d + 1;
+        idx.push(a, d, b, b, d, e);
+      }
+    }
+    if (idx.length === 0) return null;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uvv, 2));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    const m = new THREE.Mesh(g, ctx.materials.get(matName));
+    m.receiveShadow = true; m.castShadow = false; m.name = 'ribbon:' + matName;
+    return m;
+  }
+
+  const HW = R5.WIDTH / 2;
+  const roadLat = [-HW, -HW * 0.5, 0, HW * 0.5, HW];
+  root.add(ribbon('asphalt', roadLat, [0, 0, 0, 0, 0],
+    (c, f) => [c / (roadLat.length - 1), f.dist / 8.0]));
+
+  /* ---- 6.3 路肩：階梯狀凸起，3 階每階 4 cm，紅白每段 50 cm ---- */
+  const stepW = R5.KERB_W / R5.KERB_STEPS;
+  const isCorner = (f) => Math.abs(f.bank) > 0.028;      // > 1.6 度才鋪路肩
+  for (const side of [-1, 1]) {
+    const lat = [], hgt = [];
+    for (let s = 0; s < R5.KERB_STEPS; s++) {
+      lat.push(side * (HW + s * stepW)); hgt.push(s * R5.KERB_STEP_H);            // 立面下緣
+      lat.push(side * (HW + s * stepW)); hgt.push((s + 1) * R5.KERB_STEP_H);      // 立面上緣
+      lat.push(side * (HW + (s + 1) * stepW)); hgt.push((s + 1) * R5.KERB_STEP_H);// 踏面
+    }
+    const km = ribbon('kerb.redwhite', lat, hgt,
+      (c, f) => [f.dist / R5.KERB_TILE, c / (lat.length - 1)],
+      (a, b) => isCorner(a) || isCorner(b));
+    if (km) { km.castShadow = true; root.add(km); }
+  }
+
+  /* ---- 6.4 緩衝區 / 草地地形（路肩外 12 m 為緩衝，再外側落到 -4 m 接大地）---- */
+  const apronLat = [], apronH = [];
+  const OUT = HW + R5.KERB_W;
+  const apronSteps = [0, 3, R5.RUNOFF, 26, 70];
+  const apronDrop = (L2) => 0.12 - 0.34 * (1 - Math.exp(-L2 / 3.2)) - 0.018 * L2;
+  for (const side of [-1, 1]) {
+    const lat = [], hgt = [];
+    const seq = side < 0 ? apronSteps.slice().reverse() : apronSteps;
+    for (const L2 of seq) { lat.push(side * (OUT + L2)); hgt.push(L2 >= 70 ? -0.1 : apronDrop(L2)); }
+    if (side < 0) { lat.reverse(); hgt.reverse(); }
+    const am = ribbon('soil', lat, hgt, (c, f) => [(OUT + apronSteps[c]) / 6, f.dist / 6]);
+    if (am) root.add(am);
+  }
+  // 遠景大地（填掉緩衝區以外的空洞，並提供明確的視覺底）
+  const far = new THREE.Mesh(new THREE.PlaneGeometry(2400, 2400, 1, 1), ctx.materials.get('soil'));
+  far.geometry.rotateX(-Math.PI / 2);
+  far.position.set(60, -4.6, -60);
+  far.receiveShadow = true; far.castShadow = false; far.name = 'circuit.farGround';
+  root.add(far);
+
+  /* ---- 6.5 草：InstancedMesh 6000 根，onBeforeCompile 注入風的 vertex shader ---- */
+  const bladeH = 1.0;
+  const blade = new THREE.PlaneGeometry(0.028, bladeH, 1, 4);
+  blade.translate(0, bladeH / 2, 0);
+  {   // 每根草天生就微彎（不是直挺挺的紙片）
+    const p = blade.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const h = p.getY(i) / bladeH;
+      p.setZ(i, p.getZ(i) + 0.055 * h * h);
+      p.setX(i, p.getX(i) * (1 - 0.65 * h));      // 往上收尖
+    }
+    p.needsUpdate = true; blade.computeVertexNormals();
+  }
+  const grassI = [];
+  for (let i = 0; i < R5.GRASS_COUNT; i++) {
+    const f = F[Math.floor(rnd() * N)];
+    const side = rnd() < 0.5 ? -1 : 1;
+    const L2 = 4 + rnd() * 18;                    // 距路肩外緣 4–22 m
+    const p2 = new THREE.Vector3().copy(f.pos)
+      .addScaledVector(f.right, side * (OUT + L2))
+      .addScaledVector(f.up, apronDrop(L2));
+    const h = 0.05 + rnd() * 0.07;                // 每根高 5–12 cm
+    grassI.push({ p: [p2.x, p2.y, p2.z], r: [0, rnd() * Math.PI * 2, (rnd() - 0.5) * 0.25], s: [1, h, 1] });
+  }
+  const grassMesh = instanced(ctx, blade, 'grass.blade', grassI, { cast: false, receive: false });
+  {
+    const gm = grassMesh.material;
+    if (!gm.userData.__b1Wind) {
+      const uT = { value: 0 };
+      gm.userData.__b1Wind = uT;
+      const prev = gm.onBeforeCompile;
+      gm.onBeforeCompile = function (shader, renderer) {
+        if (prev) prev.call(this, shader, renderer);
+        shader.uniforms.uB1Time = uT;
+        shader.vertexShader = 'uniform float uB1Time;\n' + shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          [
+            '#include <begin_vertex>',
+            '#ifdef USE_INSTANCING',
+            '  float b1h = clamp(position.y, 0.0, 1.0);',
+            '  float b1ph = instanceMatrix[3][0] * 0.61 + instanceMatrix[3][2] * 0.83;',
+            // 主週期 2π/1.60 ≈ 3.9 s，副週期 ≈ 7.0 s（規格 3–5 秒）
+            '  float b1w = sin(uB1Time * 1.60 + b1ph) * 0.62 + sin(uB1Time * 0.90 + b1ph * 1.7) * 0.38;',
+            '  transformed.x += b1w * b1h * b1h * 0.42;',
+            '  transformed.z += b1w * b1h * b1h * 0.16;',
+            '#endif',
+          ].join('\n'));
+      };
+      gm.needsUpdate = true;
+    }
+    const uT = gm.userData.__b1Wind;
+    grassMesh.onBeforeRender = () => { uT.value = performance.now() * 0.001; };
+  }
+  grassMesh.name = 'circuit.grass';
+  root.add(grassMesh);
+
+  /* ---- 6.6 護欄：距賽道邊緣 5 m、高 1.15 m ---- */
+  const barLat = HW + R5.BARRIER_OFF;
+  const barGeo = mergeGeos(THREE, [
+    place(bevelBox(THREE, 0.24, R5.BARRIER_H, 3.90), 0, R5.BARRIER_H / 2, 0),
+    place(bevelBox(THREE, 0.40, 0.14, 3.90), 0, 0.07, 0),
+  ]);
+  const railGeo = mergeGeos(THREE, [
+    place(bevelBox(THREE, 0.05, 0.34, 3.90), 0, R5.BARRIER_H + 0.30, 0),
+    place(bevelBox(THREE, 0.07, 0.09, 0.09), 0, R5.BARRIER_H + 0.15, -1.9),
+  ]);
+  const barI = [];
+  {
+    let next = 0;
+    for (let i = 0; i < N; i++) {
+      if (F[i].dist < next) continue;
+      next = F[i].dist + 4.0;
+      const f = F[i];
+      const yaw = Math.atan2(f.t.x, f.t.z);
+      for (const side of [-1, 1]) {
+        const p2 = new THREE.Vector3().copy(f.pos)
+          .addScaledVector(f.right, side * barLat)
+          .addScaledVector(f.up, apronDrop(R5.BARRIER_OFF - R5.KERB_W));
+        barI.push({ p: [p2.x, p2.y, p2.z], r: [0, yaw, 0] });
+      }
+    }
+  }
+  root.add(instanced(ctx, barGeo, 'barrier.concrete', barI));
+  root.add(instanced(ctx, railGeo, 'barrier.metal', barI));
+
+  /* ---- 6.7 起跑線 / 計時塔 / 旗門 / 輪胎牆 / 廣告板（真實世界雜物）---- */
+  // 起跑線：長直線上 x ≈ -20 的位置
+  let startIdx = 0, best = 1e9;
+  for (let i = 0; i < N; i++) {
+    const f = F[i];
+    if (f.t.x < 0.9) continue;
+    const d = Math.abs(f.pos.x - (-20)) + Math.abs(f.pos.z - (-300));
+    if (d < best) { best = d; startIdx = i; }
+  }
+  const startU = startIdx / N;
+  const S0 = F[startIdx];
+  {
+    const yaw = Math.atan2(S0.t.x, S0.t.z);
+    // 起跑線本體（0.5 m 寬白線）+ 發車格
+    const line = bevelBox(THREE, R5.WIDTH, 0.010, 0.50, 0.002);
+    bag.add('roadline', place(line, S0.pos.x, S0.pos.y + 0.008, S0.pos.z, 0, yaw, 0));
+    for (let g = 0; g < 10; g++) {
+      const f = F[(startIdx - 6 - g * 5 + N) % N];
+      const sd = (g % 2 ? 1 : -1) * (HW * 0.45);
+      const p2 = new THREE.Vector3().copy(f.pos).addScaledVector(f.right, sd);
+      const gy = Math.atan2(f.t.x, f.t.z);
+      bag.add('roadline', place(bevelBox(THREE, 2.6, 0.008, 0.12, 0.002), p2.x, p2.y + 0.007, p2.z, 0, gy, 0));
+      bag.add('roadline', place(bevelBox(THREE, 0.12, 0.008, 5.2, 0.002), p2.x, p2.y + 0.007, p2.z, 0, gy, 0));
+    }
+    // 起跑旗門（跨越賽道的門架）
+    const gPos = new THREE.Vector3().copy(S0.pos);
+    const gy2 = yaw;
+    for (const side of [-1, 1]) {
+      const lp = new THREE.Vector3().copy(gPos).addScaledVector(S0.right, side * (HW + 1.4));
+      bag.add('barrier.metal', place(new THREE.CylinderGeometry(0.22, 0.28, 8.4, 12), lp.x, lp.y + 4.2, lp.z));
+      bag.add('barrier.concrete', place(bevelBox(THREE, 1.20, 0.35, 1.20), lp.x, lp.y + 0.16, lp.z));
+    }
+    bag.add('barrier.metal', place(bevelBox(THREE, R5.WIDTH + 3.4, 1.10, 0.55), gPos.x, gPos.y + 7.9, gPos.z, 0, gy2, 0));
+    bag.add('label.card', place(new THREE.PlaneGeometry(R5.WIDTH + 2.0, 0.85),
+      gPos.x - Math.sin(gy2 + Math.PI / 2) * 0.30, gPos.y + 7.9, gPos.z - Math.cos(gy2 + Math.PI / 2) * 0.30, 0, gy2 + Math.PI, 0));
+    // 計時塔（旗門旁）
+    const tp = new THREE.Vector3().copy(F[(startIdx + 22) % N].pos).addScaledVector(S0.right, -(HW + 12));
+    for (let f2 = 0; f2 < 5; f2++) {
+      bag.add('barrier.concrete', place(bevelBox(THREE, 6.2, 3.0, 4.4), tp.x, tp.y + 1.5 + f2 * 3.1, tp.z, 0, gy2, 0));
+      bag.add('frame.glass', place(new THREE.PlaneGeometry(5.6, 1.9),
+        tp.x + S0.right.x * 2.21, tp.y + 1.9 + f2 * 3.1, tp.z + S0.right.z * 2.21, 0, gy2 + Math.PI / 2, 0));
+    }
+    bag.add('barrier.metal', place(bevelBox(THREE, 6.6, 0.30, 4.8), tp.x, tp.y + 15.8, tp.z, 0, gy2, 0));
+  }
+  // 輪胎牆：三個危險彎的外側（真的用輪胎材質）
+  const tyre = new THREE.CylinderGeometry(0.36, 0.36, 0.24, 14, 1, false);
+  const tyreI = [];
+  for (const uu of [0.24, 0.52, 0.80]) {
+    const i0 = Math.floor(uu * N);
+    for (let k = 0; k < 26; k++) {
+      const f = F[(i0 + k) % N];
+      const side = f.bank > 0 ? -1 : 1;
+      for (let row = 0; row < 3; row++) {
+        for (let col = 0; col < 2; col++) {
+          const p2 = new THREE.Vector3().copy(f.pos)
+            .addScaledVector(f.right, side * (barLat - 0.9 - col * 0.75))
+            .addScaledVector(f.up, apronDrop(R5.BARRIER_OFF - R5.KERB_W) + 0.12 + row * 0.25);
+          tyreI.push({ p: [p2.x, p2.y, p2.z] });
+        }
+      }
+    }
+  }
+  root.add(instanced(ctx, tyre, 'car.tire', tyreI));
+  // 廣告板（護欄上方，8 面）
+  for (let i = 0; i < 8; i++) {
+    const f = F[Math.floor((i / 8) * N + 40) % N];
+    const side = (i % 2) ? 1 : -1;
+    const yaw = Math.atan2(f.t.x, f.t.z);
+    const p2 = new THREE.Vector3().copy(f.pos).addScaledVector(f.right, side * (barLat + 0.4))
+      .addScaledVector(f.up, apronDrop(R5.BARRIER_OFF - R5.KERB_W));
+    bag.add('barrier.metal', place(bevelBox(THREE, 0.10, 1.05, 9.6), p2.x, p2.y + R5.BARRIER_H + 0.70, p2.z, 0, yaw, 0));
+    bag.add('label.card', place(new THREE.PlaneGeometry(9.2, 0.88),
+      p2.x - f.right.x * side * 0.06, p2.y + R5.BARRIER_H + 0.70, p2.z - f.right.z * side * 0.06,
+      0, yaw + (side < 0 ? Math.PI / 2 : -Math.PI / 2), 0));
+  }
+  // 旗手崗哨（12 個，含遮陽棚與圍網）
+  for (let i = 0; i < 12; i++) {
+    const f = F[Math.floor((i / 12) * N + 90) % N];
+    const side = (i % 2) ? -1 : 1;
+    const yaw = Math.atan2(f.t.x, f.t.z);
+    const p2 = new THREE.Vector3().copy(f.pos).addScaledVector(f.right, side * (barLat + 2.2))
+      .addScaledVector(f.up, apronDrop(R5.BARRIER_OFF + 2.2 - R5.KERB_W));
+    for (const o of [-1.1, 1.1]) {
+      bag.add('lightpole', place(new THREE.CylinderGeometry(0.05, 0.05, 2.30, 8),
+        p2.x + f.t.x * o, p2.y + 1.15, p2.z + f.t.z * o));
+    }
+    bag.add('barrier.metal', place(bevelBox(THREE, 1.90, 0.07, 2.60), p2.x, p2.y + 2.32, p2.z, 0, yaw, 0));
+    bag.add('chainlink', place(new THREE.PlaneGeometry(2.40, 2.20), p2.x, p2.y + 1.10, p2.z, 0, yaw + Math.PI / 2, 0));
+  }
+  // 距離牌（100 / 200 / 300 m 煞車點）
+  for (const uu of [0.20, 0.48, 0.76]) {
+    for (let k = 1; k <= 3; k++) {
+      const f = F[(Math.floor(uu * N) - k * Math.floor(100 / (lengthM / N)) + N * 3) % N];
+      const p2 = new THREE.Vector3().copy(f.pos).addScaledVector(f.right, -(barLat + 1.0))
+        .addScaledVector(f.up, apronDrop(R5.BARRIER_OFF - R5.KERB_W));
+      bag.add('lightpole', place(new THREE.CylinderGeometry(0.045, 0.045, 1.70, 8), p2.x, p2.y + 0.85, p2.z));
+      bag.add('label.card', place(new THREE.PlaneGeometry(0.62, 0.62), p2.x, p2.y + 1.55, p2.z, 0, Math.atan2(f.t.x, f.t.z) + Math.PI / 2, 0));
+    }
+  }
+
+  root.add(skyDome(ctx, 700));
+
+  const dc = bag.flush(root, { 'roadline': { cast: false }, 'label.card': { cast: false } });
+  DIMENSIONS.circuit.lengthM = Math.round(lengthM * 10) / 10;
+  DIMENSIONS.circuit.elevationRange = Math.round((19.5 - 0) * 10) / 10;
+  DIMENSIONS.circuit.startU = startU;
+  DIMENSIONS.circuit.drawCallEstimate = dc + 10;
+  root.userData.dimensions = DIMENSIONS.circuit;
+
+  return {
+    group: root,
+    curve,
+    width: R5.WIDTH,
+    lengthM,
+    sampleAt,
+    startU,
+    bankTable,
+  };
+}

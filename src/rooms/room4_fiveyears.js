@@ -335,6 +335,7 @@ export function createRoom(ctx) {
     idx: 0,                    // 下一個要觸發的轉折
     pending: null,             // { turn, wait }
     shattering: 0,             // 剩餘碎裂時間
+    hudAt: -99,
     shakeT: 0,
     lostTotal: 0,
     ended: false,
@@ -647,7 +648,6 @@ Corolla Cross Hybrid：${ccHy.join('、') || '—'}。HR-V Prestige：${hrvP.joi
         shake.set(Math.sin(tt) * amp, Math.sin(tt * 1.7 + 1.2) * amp, Math.sin(tt * 0.9 + 2.4) * amp * 0.4);
         camera.position.add(shake);
         shakeApplied = true;
-        if (st.lastCamZ != null) st.lastCamZ += shake.z;   // 別把震動算成前進
       }
 
       // 走出隧道
@@ -662,7 +662,7 @@ Corolla Cross Hybrid：${ccHy.join('、') || '—'}。HR-V Prestige：${hrvP.joi
         }
       }
 
-      renderHud();
+      if (Math.abs(st.month - st.hudAt) > 0.05) { st.hudAt = st.month; renderHud(); }
     },
 
     dispose() {

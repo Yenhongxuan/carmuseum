@@ -1,0 +1,45 @@
+<!doctype html><meta charset="utf-8"><title>room 4 test — 五年</title>
+<style>html,body{margin:0;height:100%;background:#EDEEF0}#ui{position:fixed;inset:0;pointer-events:none}
+#ui>*{pointer-events:auto}
+#err{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);max-width:560px;
+ font:400 15px/1.7 "Noto Sans TC","PingFang TC",system-ui,sans-serif;color:#17191C;
+ background:#fff;border:1px solid #D6D8DC;border-left:3px solid #A8442E;border-radius:3px;padding:20px 24px;display:none}
+#hint{position:fixed;right:14px;bottom:12px;font:400 11px/1.5 system-ui,sans-serif;color:#8A9096;pointer-events:none}</style>
+<script type="importmap">{"imports":{
+ "three":"../vendor/three/build/three.module.js",
+ "three/addons/":"../vendor/three/addons/"}}</script>
+<div id="ui"></div>
+<div id="err"></div>
+<div id="hint">滑鼠左鍵旋轉／右鍵平移／滾輪縮放（OrbitControls）</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { ROOM_KEY, createRoom } from '../src/rooms/room4_fiveyears.js';
+
+try {
+  const { makeTestCtx } = await import('../src/testkit.js');   // 主代理於第 3 階段提供
+  const ctx = await makeTestCtx({ mount: document.body, ui: document.getElementById('ui'), room: ROOM_KEY });
+  const room = createRoom(ctx);
+  ctx.scene.add(room.group);
+  room.enter();
+
+  // 額外：OrbitControls 方便檢視（僅測試入口使用，正式流程由 main.js 控制相機）
+  const controls = new OrbitControls(ctx.camera, ctx.renderer.domElement);
+  controls.target.set(0, 1.2, -9);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  ctx.camera.position.set(room.spawn.pos[0], room.spawn.pos[1], room.spawn.pos[2]);
+  controls.update();
+
+  ctx.startLoop((dt, t) => { controls.update(); room.update(dt, t, ctx.camera); });
+  window.__room = room;
+} catch (e) {
+  const box = document.getElementById('err');
+  box.style.display = 'block';
+  box.innerHTML = `<b>room4_fiveyears.js 已就緒，但測試場還缺 <code>src/testkit.js</code>。</b><br>
+  該檔由主代理於第 3 階段提供（負責組出 renderer / scene / camera / materials / lighting /
+  arch / carModels / cars 的最小 ctx，並提供 startLoop）。<br><br>
+  <small style="color:#8A9096">${String(e && e.message || e)}</small>`;
+  console.error(e);
+}
+</script>

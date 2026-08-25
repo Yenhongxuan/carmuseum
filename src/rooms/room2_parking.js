@@ -22,9 +22,10 @@
  * 未達成的規格：
  *   - 「車身擦到牆」以車尾左右擺動 ＋ 巷壁上出現一道淺色擦痕貼片表現，
  *     沒有真正的碰撞偵測（沒有物理引擎）。
- *   - 進場節奏是「每 1.5 秒放一台進巷子」，但車位一次只容得下一台，
- *     所以後面的車會在巷子裡排隊（這反而比較像真的舊社區）。整場約 80–90 秒，
- *     另備「全部快轉」按鈕直接看結果。
+ *   - 進場節奏是「每 1.5 秒放一台進巷子」（規格要求），但車位一次只容得下一台，
+ *     所以後面的車會在巷子裡排隊（這反而比較像真的舊社區）。實測整場：
+ *     全部塞得進約 79 秒、全部塞不進約 128 秒（失敗動畫本身就要 2.6 秒），
+ *     比 39×1.5＝58.5 秒長。另備「全部快轉」按鈕直接看結果。
  *   - 車重無官方資料，機械車位限重一律不判定（畫面已明確標註）。
  */
 
@@ -66,9 +67,9 @@ const WEIGHT_WARNING = '⚠ 車重全無官方資料，機械車位的限重無�
 
 /* 動效時間（秒） */
 const SPAWN_GAP   = 1.5;   // 每台進巷子的間隔
-const T_PARK      = 0.55;  // 入庫
+const T_PARK      = 0.50;  // 入庫
 const T_HOLD      = 0.60;  // 停好後的靜止（關鍵時刻前的靜止）
-const T_OUT       = 0.50;  // 出庫
+const T_OUT       = 0.45;  // 出庫
 const T_FAIL_IN   = 0.90;  // 車頭進去一半
 const T_FAIL_STOP = 0.20;  // 停住
 const T_FAIL_WAG  = 0.70;  // 輕微左右擺動
@@ -382,7 +383,7 @@ export function createRoom(ctx) {
     for (const a of actors) setVis(a.id, false);
     actors.length = 0;
     queueHead = null;
-    spawnPtr = fromIndex; spawnTimer = 0; running = true; finished = false;
+    spawnPtr = fromIndex; spawnTimer = SPAWN_GAP; running = true; finished = false;   // 第一台立刻進場
     readMat.opacity = 0; scuffMat.opacity = 0;
     refreshPanel();
   }
@@ -568,8 +569,8 @@ export function createRoom(ctx) {
     try { fleet.setTransform(a.idx, _p, _q); } catch (_) {}
   }
 
-  /** 巷子裡的排隊位置：第 0 位對齊車位口，後面每 5.2 m 一台 */
-  function queueZ(k) { return k === 0 ? 0 : 5.2 * k + 1.6; }
+  /** 巷子裡的排隊位置：第 0 位對齊車位口，第 1 位就在車位口後方等，之後每 4.6 m 一台 */
+  function queueZ(k) { return k === 0 ? 0 : 2.9 + 4.6 * (k - 1); }
 
   function stepActor(a, dt) {
     const bayX = bayCenterX();
@@ -579,7 +580,7 @@ export function createRoom(ctx) {
         const k = actors.filter((o) => o.phase === 'in').indexOf(a);
         const target = (queueHead === null && k === 0) ? 0 : queueZ(Math.max(k, queueHead === null ? 0 : k + 1));
         // 指數 ease-out 逼近（不是 linear，也不是預設 ease）
-        a.z += (target - a.z) * (1 - Math.exp(-3.4 * dt));
+        a.z += (target - a.z) * (1 - Math.exp(-5.2 * dt));
         a.x += (LANE_X - a.x) * (1 - Math.exp(-6 * dt));
         a.yaw += (0 - a.yaw) * (1 - Math.exp(-6 * dt));
         if (queueHead === null && k === 0 && Math.abs(a.z) < 0.12) {
@@ -612,6 +613,8 @@ export function createRoom(ctx) {
         a.x = lerp(a.fx, LANE_X, u);
         a.yaw = lerp(a.fyaw, 0, u);
         readMat.opacity = 0.92 * (1 - u);
+        // 車已退出車位中心一半以上就把「車位」這個互斥資源釋放，下一台才不用乾等
+        if (u > 0.55 && queueHead === a) queueHead = null;
         if (a.t >= T_OUT) { a.phase = 'away'; a.t = 0; if (queueHead === a) queueHead = null; }
         break;
       }

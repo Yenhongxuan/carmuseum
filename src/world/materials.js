@@ -551,7 +551,7 @@ export function createMaterialLibrary(ctx) {
   defs['skirting'] = function () {
     const S = 256, tile = [1.2, 0.12];
     const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
-    const grainN = fbm(4301, 40, 3), low = fbm(4302, 4, 3);
+    const grainN = fbm(4301, 40, 3), low = fbm(4302, 4, 3), scuffN = fbm(4304, 12, 3);
     const rn = mulberry32(4303);
     const base = hx(0xF4F4F1);
     for (let y = 0; y < S; y++) {
@@ -561,7 +561,7 @@ export function createMaterialLibrary(ctx) {
         const gr = Math.pow(1 - Math.abs(frac(v * 26 + (low(u, v) - 0.5) * 2.4) * 2 - 1), 3);
         const f = 1 + (low(u, v) - 0.5) * 0.02 - gr * 0.05;
         // 底部（v→0）踢腳鞋痕
-        const scuff = (1 - smooth01(v / 0.35)) * Math.pow(fbm(4304, 12, 3)(u, v), 2.0);
+        const scuff = (1 - smooth01(v / 0.35)) * Math.pow(scuffN(u, v), 2.0);
         A[i] = base[0] * f * (1 - scuff * 0.30);
         A[i + 1] = base[1] * f * (1 - scuff * 0.32);
         A[i + 2] = base[2] * f * (1 - scuff * 0.33);
@@ -608,13 +608,13 @@ export function createMaterialLibrary(ctx) {
   defs['frame.glass'] = function () {
     const S = 256, tile = [0.6, 0.6];
     const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
-    const wave = fbm(4501, 4, 3), smudge = fbm(4502, 9, 3);
+    const wave = fbm(4501, 4, 3), smudge = fbm(4502, 9, 3), dustN = valueNoise(4504, 64);
     const rn = mulberry32(4503);
     for (let y = 0; y < S; y++) {
       for (let x = 0; x < S; x++) {
         const u = x / S, v = y / S, p = y * S + x, i = p * 4;
         const sm = Math.pow(clamp01((smudge(u, v) - 0.56) * 3.4), 1.6);   // 指紋／擦痕
-        const dust = Math.pow(clamp01((valueNoise(4504, 64)(u, v) - 0.72) * 4.0), 2.0);
+        const dust = Math.pow(clamp01((dustN(u, v) - 0.72) * 4.0), 2.0);
         const c = 253 - sm * 6 - dust * 10;
         A[i] = c; A[i + 1] = c + 1; A[i + 2] = c + 2; A[i + 3] = 255;
         R[p] = 0.05 + sm * 0.10 + dust * 0.16 + (rn() - 0.5) * 0.006;
@@ -640,6 +640,7 @@ export function createMaterialLibrary(ctx) {
     const rn = mulberry32(o.seed);
     const low = fbm(o.seed + 3, 4, 3);
     const dustN = fbm(o.seed + 9, 6, 3);
+    const fineN = valueNoise(o.seed + 21, 256);
     const c = hx(o.color);
     const streak = new Float32Array(S);
     for (let y = 0; y < S; y++) streak[y] = rn();
@@ -648,7 +649,7 @@ export function createMaterialLibrary(ctx) {
         const u = x / S, v = y / S, p = y * S + x, i = p * 4;
         // 沿 u 的拉絲
         const st = (streak[y] - 0.5) * 2;
-        const fineStreak = (valueNoise(o.seed + 21, 512)(u * 0.05, v) - 0.5);
+        const fineStreak = (fineN(u * 0.08, v) - 0.5);
         const f = 1 + st * 0.035 + (low(u, v) - 0.5) * 0.04;
         // ★ 灰塵：局部 Roughness 升到 dustRough
         const dz = o.dust ? Math.pow(clamp01((dustN(u, v) - 0.44) * 2.3), 1.4) : 0;
@@ -1364,3 +1365,603 @@ export function createMaterialLibrary(ctx) {
     texRec.set('sky', { map: cloudTex, roughnessMap: null, normalMap: null, aoMap: null });
     return m;
   };
+
+  /* ══════════════════════════════════════════════════════════════════
+     廳六 · 法庭 ／ 其他道具
+     ══════════════════════════════════════════════════════════════════ */
+  function bakeTerrazzo(o) {
+    const S = o.size, tile = o.tile;
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
+    const rn = mulberry32(o.seed);
+    const chips = worley(o.seed + 3, o.chipCells);
+    const fineChips = worley(o.seed + 5, o.chipCells * 2.2);
+    const low = fbm(o.seed + 9, 3, 3);
+    const base = hx(o.base);
+    for (let y = 0; y < S; y++) {
+      const v = y / S;
+      for (let x = 0; x < S; x++) {
+        const u = x / S, p = y * S + x, i = p * 4;
+        const w = chips(u, v);
+        const cs = clamp01(1 - w.f1 / 0.66);
+        const w2 = fineChips(u, v);
+        const cs2 = clamp01(1 - w2.f1 / 0.55) * 0.6;
+        const f = 1 + (low(u, v) - 0.5) * o.mottle;
+        let r8 = base[0] * f, g8 = base[1] * f, b8 = base[2] * f;
+        if (cs > 0.02) {
+          const tone = w.id;
+          const cc = lerp(o.chipLo, o.chipHi, tone);
+          const k = Math.pow(cs, 0.6) * 0.8;
+          r8 = lerp(r8, cc, k); g8 = lerp(g8, cc * 0.995, k); b8 = lerp(b8, cc * 0.985, k);
+        }
+        if (cs2 > 0.02) {
+          const cc2 = lerp(o.chipLo, o.chipHi, w2.id);
+          r8 = lerp(r8, cc2, cs2 * 0.5); g8 = lerp(g8, cc2, cs2 * 0.5); b8 = lerp(b8, cc2, cs2 * 0.5);
+        }
+        A[i] = r8; A[i + 1] = g8; A[i + 2] = b8; A[i + 3] = 255;
+        // ★ 邊緣被踩踏處更亮（貼圖四周）
+        const edge = 1 - smooth01(Math.min(Math.min(u, 1 - u), Math.min(v, 1 - v)) / 0.12);
+        R[p] = lerp(o.rough, o.roughEdge, edge) + (low(u, v) - 0.5) * 0.05 + (rn() - 0.5) * 0.03 - cs * 0.03;
+        H[p] = clamp01(0.55 + cs * 0.30 + cs2 * 0.18 + (low(u, v) - 0.5) * 0.20);
+      }
+    }
+    return { A, R, H, size: S, tile };
+  }
+
+  defs['court.platform'] = function () {
+    const b = bakeTerrazzo({
+      size: 512, tile: [2.0, 2.0], seed: 6101, base: 0xFAFAF7,
+      chipCells: 70, chipLo: 196, chipHi: 246, mottle: 0.03, rough: 0.68, roughEdge: 0.50,
+    });
+    return make('court.platform', {
+      size: b.size, tile: b.tile, A: b.A, R: b.R, H: b.H, heightMM: 1.0, repeat: [1, 1],
+      params: { roughness: 1.0, metalness: 0.0, color: 0xffffff },
+    });
+  };
+  defs['court.stone'] = function () {
+    const b = bakeTerrazzo({
+      size: 512, tile: [1.2, 1.2], seed: 6102, base: 0xE6E4DE,
+      chipCells: 55, chipLo: 150, chipHi: 226, mottle: 0.06, rough: 0.70, roughEdge: 0.54,
+    });
+    return make('court.stone', {
+      size: b.size, tile: b.tile, A: b.A, R: b.R, H: b.H, heightMM: 1.2, repeat: [5, 5],
+      params: { roughness: 1.0, metalness: 0.0, color: 0xffffff },
+    });
+  };
+
+  defs['chainlink'] = function () {
+    const S = 256, tile = [0.30, 0.30];
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S), AL = fieldOf(S);
+    const rn = mulberry32(6201);
+    const spangle = worley(6202, 26);
+    const rust = fbm(6203, 6, 3);
+    const N = tile[0] / 0.05;                 // 5cm 網目
+    const wpx = 0.055;                        // 線徑（相對格距）
+    for (let y = 0; y < S; y++) {
+      const v = y / S;
+      for (let x = 0; x < S; x++) {
+        const u = x / S, p = y * S + x, i = p * 4;
+        const a = frac((u + v) * N), b2 = frac((u - v) * N);
+        const da = Math.min(a, 1 - a), db = Math.min(b2, 1 - b2);
+        const d = Math.min(da, db);
+        const wire = clamp01(1 - d / wpx);
+        AL[p] = wire > 0.06 ? 1 : 0;
+        const round = Math.pow(wire, 0.5);           // 圓線的明暗
+        const sp = spangle(u, v);
+        const sk = 0.9 + (sp.id - 0.5) * 0.22 + clamp01(1 - sp.f1 / 0.7) * 0.10;
+        const rs = Math.pow(clamp01((rust(u, v) - 0.66) * 3.2), 1.6);
+        let c = 172 * sk * (0.72 + 0.32 * round);
+        A[i] = lerp(c, 128, rs); A[i + 1] = lerp(c * 0.99, 92, rs); A[i + 2] = lerp(c * 0.97, 66, rs); A[i + 3] = 255;
+        R[p] = 0.50 + (sp.id - 0.5) * 0.10 + rs * 0.35 + (rn() - 0.5) * 0.03 - round * 0.05;
+        H[p] = clamp01(round);
+      }
+    }
+    return make('chainlink', {
+      size: S, tile, A, R, H, AL, heightMM: 3.0, repeat: [8, 4],
+      params: {
+        roughness: 1.0, metalness: 0.65, color: 0xffffff,
+        transparent: true, alphaTest: 0.45, side: T.DoubleSide, depthWrite: true,
+      },
+    });
+  };
+
+  defs['lightpole'] = function () {
+    const S = 256, tile = [0.40, 2.0];
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
+    const rn = mulberry32(6301);
+    const spangle = worley(6302, 18);          // 鍍鋅結晶
+    const drip = fbm(6303, 5, 3);
+    const low = fbm(6304, 3, 2);
+    const base = hx(0xB9BCBE);
+    for (let y = 0; y < S; y++) {
+      const v = y / S;
+      for (let x = 0; x < S; x++) {
+        const u = x / S, p = y * S + x, i = p * 4;
+        const sp = spangle(u, v);
+        const cr = clamp01(1 - sp.f1 / 0.75);
+        const f = 0.94 + (sp.id - 0.5) * 0.14 + cr * 0.08 + (low(u, v) - 0.5) * 0.05;
+        const dz = (1 - smooth01(v / 0.22)) * Math.pow(clamp01(drip(u, v) + 0.1), 1.4);
+        let r8 = base[0] * f, g8 = base[1] * f, b8 = base[2] * f;
+        r8 = lerp(r8, 118, dz * 0.45); g8 = lerp(g8, 110, dz * 0.45); b8 = lerp(b8, 98, dz * 0.45);
+        A[i] = r8; A[i + 1] = g8; A[i + 2] = b8; A[i + 3] = 255;
+        R[p] = 0.50 + (sp.id - 0.5) * 0.12 - cr * 0.06 + dz * 0.20 + (rn() - 0.5) * 0.03;
+        H[p] = clamp01(0.45 + cr * 0.40 + (sp.id - 0.5) * 0.15 + (low(u, v) - 0.5) * 0.2);
+      }
+    }
+    return make('lightpole', {
+      size: S, tile, A, R, H, heightMM: 0.5, repeat: [1, 3],
+      params: { roughness: 1.0, metalness: 0.60, color: 0xffffff, envMapIntensity: 1.0 },
+    });
+  };
+
+  function bakeDayCell(o) {
+    const S = 128, tile = [0.10, 0.10];
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
+    const rn = mulberry32(o.seed);
+    const fiber = fbm(o.seed + 3, 40, 2), low = fbm(o.seed + 7, 4, 2);
+    const base = hx(o.color);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const u = x / S, v = y / S, p = y * S + x, i = p * 4;
+        const fb = fiber(u, v) - 0.5;
+        const edge = 1 - smooth01(Math.min(Math.min(u, 1 - u), Math.min(v, 1 - v)) / 0.08);
+        const f = 1 + (low(u, v) - 0.5) * o.mottle + fb * 0.02 - edge * o.edgeDark;
+        A[i] = base[0] * f; A[i + 1] = base[1] * f; A[i + 2] = base[2] * f; A[i + 3] = 255;
+        R[p] = o.rough + fb * 0.06 + (rn() - 0.5) * 0.03 + edge * 0.06;
+        H[p] = clamp01(0.55 + fb * 0.8 - edge * 0.45);
+      }
+    }
+    return { A, R, H, size: S, tile };
+  }
+  defs['daycell'] = function () {
+    const b = bakeDayCell({ seed: 6401, color: 0xF2F4F6, mottle: 0.02, rough: 0.55, edgeDark: 0.05 });
+    return make('daycell', {
+      size: b.size, tile: b.tile, A: b.A, R: b.R, H: b.H, heightMM: 0.15, repeat: [1, 1],
+      params: {
+        roughness: 1.0, metalness: 0.0, color: 0xffffff,
+        emissive: 0xF2F4F6, emissiveIntensity: 0.22,
+      },
+    });
+  };
+  defs['daycell.dim'] = function () {
+    const b = bakeDayCell({ seed: 6402, color: 0xA8A5A0, mottle: 0.05, rough: 0.80, edgeDark: 0.10 });
+    return make('daycell.dim', {
+      size: b.size, tile: b.tile, A: b.A, R: b.R, H: b.H, heightMM: 0.15, repeat: [1, 1],
+      params: { roughness: 1.0, metalness: 0.0, color: 0xffffff },
+    });
+  };
+
+  /* ══════════════════════════════════════════════════════════════════
+     車輛材質
+     ══════════════════════════════════════════════════════════════════ */
+  let dustTex = null;
+  function getDustTex() {
+    if (dustTex) return dustTex;
+    const S = 256, F = fieldOf(S);
+    const n = fbm(7001, 6, 4), n2 = fbm(7002, 40, 2);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const u = x / S, v = y / S;
+        F[y * S + x] = clamp01(n(u, v) * 0.65 + n2(u, v) * 0.35);
+      }
+    }
+    dustTex = toTex(fieldToCanvas(F, S), false, [1, 1]);
+    return dustTex;
+  }
+
+  /** ★ setDust：依世界法線 Y 加權，灰塵優先積在水平面 */
+  function injectDust(mat) {
+    const u = {
+      uDust: { value: dustAmt },
+      uDustColor: { value: new T.Color(0x9A968E) },
+      uDustMap: { value: getDustTex() },
+      uGray: { value: gray ? 1 : 0 },
+    };
+    mat.userData.dust = u;
+    injected.push(u);
+    const key = mat.name;
+    const decl = ['uniform float uDust;', 'uniform vec3 uDustColor;',
+      'uniform sampler2D uDustMap;', 'uniform float uGray;'].join('\n');
+    const body = [
+      '{',
+      '  vec2 mlDustUv = vec2( 0.5 );',
+      '  #ifdef USE_NORMALMAP',
+      '    mlDustUv = vNormalMapUv;',
+      '  #elif defined( USE_MAP )',
+      '    mlDustUv = vMapUv;',
+      '  #endif',
+      '  vec3 mlWN = normalize( ( vec4( normal, 0.0 ) * viewMatrix ).xyz );',
+      '  float mlUp = clamp( mlWN.y, 0.0, 1.0 );',
+      '  float mlW = mix( 0.16, 1.0, pow( mlUp, 1.6 ) );',   // ★ 垂直面較少
+      '  float mlG = texture2D( uDustMap, mlDustUv * 5.0 ).r;',
+      '  float mlAmt = clamp( uDust * mlW * ( 0.55 + 0.9 * mlG ), 0.0, 1.0 ) * 0.28;',
+      '  vec3 mlDC = mix( uDustColor, vec3( 0.5 ), uGray );',
+      '  diffuseColor.rgb = mix( diffuseColor.rgb, mlDC, mlAmt );',
+      '  roughnessFactor = mix( roughnessFactor, 0.86, clamp( mlAmt * 2.6, 0.0, 1.0 ) );',
+      '}',
+    ].join('\n');
+    mat.onBeforeCompile = function (shader) {
+      for (const k in u) shader.uniforms[k] = u[k];
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\n' + decl)
+        .replace('#include <normal_fragment_maps>', '#include <normal_fragment_maps>\n' + body);
+    };
+    mat.customProgramCacheKey = function () { return 'ml:' + key; };
+  }
+
+  defs['car.paint'] = function () {
+    const S = 256, tile = [1.0, 1.0];
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
+    const rn = mulberry32(7101);
+    const peel = fbm(7102, 14, 3), flake = valueNoise(7103, 256), low = fbm(7104, 3, 2);
+    const base = hx(0xF2F4F8);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const u = x / S, v = y / S, p = y * S + x, i = p * 4;
+        const pk = peel(u, v) - 0.5;
+        const fl = flake(u, v) - 0.5;
+        const f = 1 + (low(u, v) - 0.5) * 0.012 + fl * 0.018;
+        A[i] = base[0] * f; A[i + 1] = base[1] * f; A[i + 2] = base[2] * f; A[i + 3] = 255;
+        // roughnessMap 以 1.0 為中心 → material.roughness 才能被 setDust 直接控制
+        R[p] = 1.0 + pk * 0.12 + fl * 0.06 + (rn() - 0.5) * 0.02;
+        H[p] = clamp01(0.5 + pk * 1.1 + fl * 0.25);
+      }
+    }
+    const m = make('car.paint', {
+      size: S, tile, A, R, H, heightMM: 0.015, repeat: [2, 2],
+      physical: true,
+      params: {
+        color: 0xffffff, roughness: 0.28, metalness: 0.0,
+        clearcoat: 0.7, clearcoatRoughness: 0.06,
+        envMapIntensity: 1.15,
+      },
+    });
+    m.normalScale = new T.Vector2(0.6, 0.6);
+    injectDust(m);
+    return m;
+  };
+
+  defs['car.glass'] = function () {
+    const S = 256, tile = [1.0, 1.0];
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
+    const rn = mulberry32(7201);
+    const wave = fbm(7202, 4, 3), smudge = fbm(7203, 8, 3);
+    const base = hx(0x2A3140);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const u = x / S, v = y / S, p = y * S + x, i = p * 4;
+        const sm = Math.pow(clamp01((smudge(u, v) - 0.58) * 3.2), 1.5);
+        const f = 1 + (wave(u, v) - 0.5) * 0.08;
+        A[i] = lerp(base[0] * f, 92, sm * 0.35);
+        A[i + 1] = lerp(base[1] * f, 96, sm * 0.35);
+        A[i + 2] = lerp(base[2] * f, 102, sm * 0.35);
+        A[i + 3] = 255;
+        R[p] = 0.05 + sm * 0.13 + (rn() - 0.5) * 0.008;
+        H[p] = clamp01(0.5 + (wave(u, v) - 0.5) * 1.0 + sm * 0.2);
+      }
+    }
+    return make('car.glass', {
+      size: S, tile, A, R, H, heightMM: 0.02, repeat: [1, 1],
+      physical: true,
+      params: {
+        color: 0xffffff, roughness: 1.0, metalness: 0.0,
+        transmission: 0.7, ior: 1.5, thickness: 0.006,
+        transparent: false, side: T.FrontSide, envMapIntensity: 1.2,
+      },
+    });
+  };
+
+  defs['car.tire'] = function () {
+    const S = 512, tile = [0.90, 0.25];
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
+    const rn = mulberry32(7301);
+    const low = fbm(7302, 5, 3), micro = fbm(7303, 60, 2);
+    const base = hx(0x1A1F2A);
+    for (let y = 0; y < S; y++) {
+      const v = y / S;
+      // v: 0–0.22 側壁 / 0.22–0.78 胎面 / 0.78–1 側壁
+      const sideT = 1 - smooth01((Math.min(v, 1 - v) - 0.10) / 0.14);
+      for (let x = 0; x < S; x++) {
+        const u = x / S, p = y * S + x, i = p * 4;
+        let h, rough;
+        if (sideT > 0.5) {
+          // ★ 側面胎紋：環向細肋 + 字樣凸起帶
+          const rib = Math.pow(1 - Math.abs(frac(v * 44) * 2 - 1), 2.2);
+          const letters = Math.pow(clamp01(Math.sin(u * Math.PI * 26) * 0.5 + 0.5), 6.0)
+            * (1 - smooth01(Math.abs(Math.min(v, 1 - v) - 0.055) / 0.028));
+          h = 0.42 + rib * 0.10 + letters * 0.30 + (low(u, v) - 0.5) * 0.08;
+          rough = 0.88 + (micro(u, v) - 0.5) * 0.06;
+        } else {
+          // 胎面：縱向溝 + 橫向刀槽
+          const groove = Math.pow(clamp01(Math.abs(frac(v * 5.0) * 2 - 1) * 1.5 - 0.32), 0.7);
+          const sipe = 1 - Math.pow(clamp01(Math.abs(frac(u * 34 + v * 2.4) * 2 - 1) * 3.2), 0.8);
+          h = clamp01(0.30 + groove * 0.70 - sipe * 0.42);
+          rough = 0.86 + (micro(u, v) - 0.5) * 0.07 + (1 - groove) * 0.04;
+        }
+        const f = 1 + (low(u, v) - 0.5) * 0.10 + (micro(u, v) - 0.5) * 0.05 + (h - 0.5) * 0.12;
+        A[i] = base[0] * f; A[i + 1] = base[1] * f; A[i + 2] = base[2] * f; A[i + 3] = 255;
+        R[p] = rough + (rn() - 0.5) * 0.03;
+        H[p] = clamp01(h);
+      }
+    }
+    return make('car.tire', {
+      size: S, tile, A, R, H, heightMM: 8.0, repeat: [1, 1],
+      params: { roughness: 1.0, metalness: 0.0, color: 0x1A1F2A },
+    });
+  };
+
+  defs['car.wheel'] = function () {
+    const S = 256, tile = [0.6, 0.6];
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
+    const rn = mulberry32(7401);
+    const low = fbm(7402, 4, 3), dustN = fbm(7403, 7, 3);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const u = x / S, v = y / S, p = y * S + x, i = p * 4;
+        // 車床紋（同心細紋）
+        const cx = u - 0.5, cy = v - 0.5;
+        const r = Math.sqrt(cx * cx + cy * cy);
+        const lathe = Math.pow(1 - Math.abs(frac(r * 130) * 2 - 1), 2.0);
+        const bd = Math.pow(clamp01((dustN(u, v) - 0.45) * 2.2), 1.4);   // 煞車粉塵
+        const f = (0.90 + (low(u, v) - 0.5) * 0.06 - lathe * 0.05);
+        let c = 214 * f;
+        A[i] = lerp(c, 96, bd * 0.55); A[i + 1] = lerp(c * 0.995, 82, bd * 0.55); A[i + 2] = lerp(c * 0.99, 72, bd * 0.55);
+        A[i + 3] = 255;
+        R[p] = 0.25 + lathe * 0.06 + bd * 0.34 + (rn() - 0.5) * 0.02;
+        H[p] = clamp01(0.5 + lathe * 0.4 + (low(u, v) - 0.5) * 0.3);
+      }
+    }
+    return make('car.wheel', {
+      size: S, tile, A, R, H, heightMM: 0.10, repeat: [1, 1],
+      params: { roughness: 1.0, metalness: 0.80, color: 0xffffff, envMapIntensity: 1.2 },
+    });
+  };
+
+  defs['car.lamp'] = function () {
+    const S = 256, tile = [0.4, 0.15];
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
+    const rn = mulberry32(7501);
+    const low = fbm(7502, 5, 2);
+    for (let y = 0; y < S; y++) {
+      const v = y / S;
+      for (let x = 0; x < S; x++) {
+        const u = x / S, p = y * S + x, i = p * 4;
+        // 燈殼稜鏡（縱向柱狀） + 內部反射面的細格
+        const prism = 1 - Math.abs(frac(u * 30) * 2 - 1);
+        const inner = Math.pow(1 - Math.abs(frac(u * 30 + 0.5) * 2 - 1), 0.6)
+          * Math.pow(1 - Math.abs(frac(v * 12) * 2 - 1), 0.6);
+        const f = 0.95 + (low(u, v) - 0.5) * 0.05 + inner * 0.06;
+        const c = 236 * f;
+        A[i] = c; A[i + 1] = c * 0.995; A[i + 2] = c * 0.985; A[i + 3] = 255;
+        R[p] = 0.12 + (1 - prism) * 0.05 + inner * 0.05 + (rn() - 0.5) * 0.01;
+        H[p] = clamp01(0.35 + prism * 0.55 + inner * 0.12);
+      }
+    }
+    return make('car.lamp', {
+      size: S, tile, A, R, H, heightMM: 1.2, repeat: [1, 1],
+      physical: true,
+      params: {
+        color: 0xffffff, roughness: 1.0, metalness: 0.0,
+        transmission: 0.35, ior: 1.45, thickness: 0.02,
+        clearcoat: 0.6, clearcoatRoughness: 0.08,
+        transparent: false, side: T.FrontSide, envMapIntensity: 1.3,
+      },
+    });
+  };
+
+  defs['car.trim'] = function () {
+    const S = 256, tile = [0.4, 0.4];
+    const A = rgbaOf(S), R = fieldOf(S), H = fieldOf(S);
+    const rn = mulberry32(7601);
+    const grain = worley(7602, 90), low = fbm(7603, 5, 3);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const u = x / S, v = y / S, p = y * S + x, i = p * 4;
+        const g = grain(u, v);
+        const gs = clamp01(1 - g.f1 / 0.7);
+        const f = 0.92 + (low(u, v) - 0.5) * 0.08 + (g.id - 0.5) * 0.10 + gs * 0.08;
+        const c = 30 * f + 4;
+        A[i] = c; A[i + 1] = c * 1.02; A[i + 2] = c * 1.06; A[i + 3] = 255;
+        R[p] = 0.75 + (g.id - 0.5) * 0.08 - gs * 0.05 + (rn() - 0.5) * 0.03;
+        H[p] = clamp01(0.45 + gs * 0.45 + (low(u, v) - 0.5) * 0.2);
+      }
+    }
+    return make('car.trim', {
+      size: S, tile, A, R, H, heightMM: 0.25, repeat: [2, 2],
+      params: { roughness: 1.0, metalness: 0.0, color: 0xffffff },
+    });
+  };
+
+  defs['car.shadow'] = function () {
+    const S = 256;
+    const A = rgbaOf(S);
+    const soft = fbm(7701, 4, 3);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const u = x / S, v = y / S, i = (y * S + x) * 4;
+        const dx = (u - 0.5) / 0.46, dy = (v - 0.5) / 0.30;   // 橢圓
+        const d = Math.sqrt(dx * dx + dy * dy);
+        let a = Math.pow(1 - smooth01(d), 1.7);
+        a *= 0.82 + 0.18 * soft(u, v);
+        A[i] = 12; A[i + 1] = 12; A[i + 2] = 14;
+        A[i + 3] = Math.round(clamp01(a) * 255);
+      }
+    }
+    const t = toTex(rgbaToCanvas(A, S), true, [1, 1]);
+    t.wrapS = T.ClampToEdgeWrapping;
+    t.wrapT = T.ClampToEdgeWrapping;
+    const m = new T.MeshBasicMaterial({
+      map: t, transparent: true, opacity: 0.55, depthWrite: false,
+      side: T.DoubleSide, toneMapped: false,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+    });
+    m.name = 'car.shadow';
+    m.userData.tileMeters = { x: 1, y: 1 };
+    texRec.set('car.shadow', { map: t, roughnessMap: null, normalMap: null, aoMap: null });
+    return m;
+  };
+
+  /* ══════════════════════════════════════════════════════════════════
+     公開 API
+     ══════════════════════════════════════════════════════════════════ */
+  const NAME_SET = new Set(MATERIAL_NAMES);
+  const NO_GRAY = new Set(['car.shadow']);   // map 是 alpha 資料，不是 albedo
+
+  // 建立時就檢查：37 個名稱一定要都有 builder（缺一個就當場爆，不留到執行期）
+  for (const n of MATERIAL_NAMES) {
+    if (typeof defs[n] !== 'function') {
+      throw new Error('materials.js: 缺少材質 builder「' + n + '」');
+    }
+  }
+
+  function applyGray(name, m, on) {
+    if (NO_GRAY.has(name)) return;
+    if (on) {
+      if (grayBak.has(name)) return;
+      const bak = {
+        color: m.color ? m.color.getHex() : null,
+        map: ('map' in m) ? (m.map || null) : undefined,
+        emissive: m.emissive ? m.emissive.getHex() : null,
+        attenuationColor: m.attenuationColor ? m.attenuationColor.getHex() : null,
+        sheenColor: m.sheenColor ? m.sheenColor.getHex() : null,
+      };
+      grayBak.set(name, bak);
+      if (m.color) m.color.setHex(0x808080);
+      if (bak.map !== undefined) m.map = null;
+      if (m.emissive) m.emissive.setHex(0x808080);
+      if (m.attenuationColor) m.attenuationColor.setHex(0x808080);
+      if (m.sheenColor) m.sheenColor.setHex(0x808080);
+      m.needsUpdate = true;
+    } else {
+      const bak = grayBak.get(name);
+      if (!bak) return;
+      if (bak.color !== null && m.color) m.color.setHex(bak.color);
+      if (bak.map !== undefined) m.map = bak.map;
+      if (bak.emissive !== null && m.emissive) m.emissive.setHex(bak.emissive);
+      if (bak.attenuationColor !== null && m.attenuationColor) m.attenuationColor.setHex(bak.attenuationColor);
+      if (bak.sheenColor !== null && m.sheenColor) m.sheenColor.setHex(bak.sheenColor);
+      grayBak.delete(name);
+      m.needsUpdate = true;
+    }
+  }
+
+  /** ★ 廳四五年隧道：0 → 1 連續積灰 */
+  function applyDust(name, m) {
+    const a = clamp01(dustAmt);
+    if (name === 'car.paint') {
+      m.clearcoat = lerp(0.85, 0.35, a);
+      m.clearcoatRoughness = lerp(0.05, 0.35, a);
+      m.roughness = lerp(0.25, 0.48, a);
+      if (m.userData.dust) m.userData.dust.uDust.value = a;
+    } else if (name === 'car.tire') {
+      const c = new T.Color(0x1A1F2A).lerp(new T.Color(0x3A3F45), a);
+      const bak = grayBak.get('car.tire');
+      if (gray && bak) bak.color = c.getHex();      // 灰階中：只改「還原用」的顏色
+      else m.color.copy(c);
+    }
+  }
+
+  function build(name) {
+    const m = defs[name]();
+    mats.set(name, m);
+    if (name === 'car.paint' || name === 'car.tire') applyDust(name, m);
+    if (gray) applyGray(name, m, true);
+    return m;
+  }
+
+  function get(name) {
+    if (disposed) throw new Error('materials.js: MaterialLibrary 已 dispose，不可再 get('
+      + name + ')');
+    if (!NAME_SET.has(name) || typeof defs[name] !== 'function') {
+      throw new Error('materials.js: 找不到材質「' + name + '」。可用名稱見 MATERIAL_NAMES（共 '
+        + MATERIAL_NAMES.length + ' 個）');
+    }
+    return mats.get(name) || build(name);
+  }
+
+  const lib = {
+    get: get,
+    has: function (name) { return NAME_SET.has(name); },
+    /** { map, roughnessMap, normalMap, aoMap }（aoMap 一律 null，見檔頭說明） */
+    texture: function (name) {
+      get(name);
+      return texRec.get(name) || { map: null, roughnessMap: null, normalMap: null, aoMap: null };
+    },
+    /** ★ 灰階檢驗：Albedo 全換 #808080，保留 Roughness / Normal */
+    setGrayscale: function (on) {
+      on = !!on;
+      if (on === gray) return;
+      gray = on;
+      for (const e of mats) applyGray(e[0], e[1], on);
+      for (let i = 0; i < injected.length; i++) {
+        if (injected[i].uGray) injected[i].uGray.value = on ? 1 : 0;
+      }
+    },
+    isGrayscale: function () { return gray; },
+    /** ★ 廳四積灰 0→1，只影響 car.paint / car.tire */
+    setDust: function (amount01) {
+      dustAmt = clamp01(Number(amount01) || 0);
+      if (mats.has('car.paint')) applyDust('car.paint', mats.get('car.paint'));
+      if (mats.has('car.tire')) applyDust('car.tire', mats.get('car.tire'));
+    },
+    getDust: function () { return dustAmt; },
+    /** sky 的雲會動：每幀呼叫，或直接用 material.userData.update(t) */
+    update: function (elapsed) {
+      const sky = mats.get('sky');
+      if (sky && sky.userData.update) sky.userData.update(elapsed);
+    },
+    /**
+     * 依實際表面尺寸（公尺）設定 repeat。
+     * 例：fitRepeat('floor.oak', 12.0, 9.0)
+     * 注意：材質是共用的，一個名稱只能有一組 repeat。
+     */
+    fitRepeat: function (name, widthMeters, heightMeters) {
+      const m = get(name);
+      const tm = m.userData.tileMeters;
+      const rec = texRec.get(name);
+      if (!tm || !rec) return m;
+      const rx = widthMeters / tm.x, ry = heightMeters / tm.y;
+      for (const k in rec) {
+        const t = rec[k];
+        if (t && t.repeat) { t.repeat.set(rx, ry); t.needsUpdate = true; }
+      }
+      return m;
+    },
+    /** 已生成的貼圖記憶體估計（含 mipmap）。預算 120 MB。 */
+    stats: function () {
+      let bytes = 0;
+      for (let i = 0; i < allTex.length; i++) {
+        bytes += (allTex[i].userData && allTex[i].userData.bytes) || 0;
+      }
+      return {
+        materialsBuilt: mats.size,
+        materialsTotal: MATERIAL_NAMES.length,
+        textures: allTex.length,
+        estimatedTextureMB: Math.round(bytes / 1048576 * 100) / 100,
+        budgetMB: 120,
+        grayscale: gray,
+        dust: dustAmt,
+      };
+    },
+    /** 一次生成全部（測試 / 灰階檢驗用；正式流程請維持 lazy） */
+    warmAll: function () {
+      for (let i = 0; i < MATERIAL_NAMES.length; i++) get(MATERIAL_NAMES[i]);
+      return lib.stats();
+    },
+    names: MATERIAL_NAMES.slice(),
+    dispose: function () {
+      for (let i = 0; i < allTex.length; i++) { try { allTex[i].dispose(); } catch (e) { /* noop */ } }
+      for (const e of mats) { try { e[1].dispose(); } catch (e2) { /* noop */ } }
+      allTex.length = 0;
+      injected.length = 0;
+      mats.clear();
+      texRec.clear();
+      grayBak.clear();
+      dustTex = null;
+      disposed = true;
+    },
+  };
+
+  return lib;
+}
+
+export default createMaterialLibrary;

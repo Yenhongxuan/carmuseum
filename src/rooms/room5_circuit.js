@@ -68,8 +68,16 @@ const BUMP_ZONE_M = 16;
 const BUMP_SLOW = 0.40;
 /** 起跑線後多少公尺內不放減速帶。 */
 const BUMP_CLEAR_M = 300;
-/** 單一減速帶對單一車輛累積落後的上限（佔一圈的比例），避免多圈之後被拖到繞圈落後。 */
-const LAG_CAP = 0.012;
+/**
+ * 單一減速帶對單一車輛「累積落後」的上限（佔一圈的比例）。
+ * 沒有上限的話，跑幾圈之後落後量會蓋過「車距 = 得分差」的關係，
+ * 左邊的賽道名次會變成純粹的減速帶名次。上限訂在 0.005（約 8 公尺，
+ * 20 條全中最多 0.10，約為 SPREAD 的三成），讓賽道名次仍以得分為主、
+ * 減速帶只造成局部前後交換 —— 這正是雙排名要顯示的不一致。
+ * 副作用（誠實記錄）：同一台車第二圈之後再經過同一條減速帶，
+ * 仍會震動並跳卡片，但不會再繼續掉隊。
+ */
+const LAG_CAP = 0.005;
 /** 玩家撞到減速帶的畫面震動時間（毫秒）。 */
 const SHAKE_MS = 200;
 /** 換車相機飛行時間（毫秒）。 */
@@ -259,6 +267,32 @@ export function createRoom(ctx) {
   const bumpMismatch = bumps.filter((b) => b.hitCount !== b.expected)
     .map((b) => ({ id: b.id, got: b.hitCount, expected: b.expected }));
 
+  function orientTo(obj, s) {
+    obj.position.copy(s.pos);
+    obj.quaternion.copy(quatFrom(s));
+  }
+
+  const _zA = new THREE.Vector3(), _yA = new THREE.Vector3(), _xA = new THREE.Vector3();
+  const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _qBank = new THREE.Quaternion();
+  const _fwd = new THREE.Vector3(0, 0, 1);
+  function quatFrom(s, out) {
+    // 車輛本地 -Z = 前進方向 → 本地 +Z 對應 -tangent
+    _zA.copy(s.tangent).normalize().negate();
+    _yA.copy(s.up || _yA.set(0, 1, 0)).normalize();
+    _xA.crossVectors(_yA, _zA);
+    if (_xA.lengthSq() < 1e-8) _xA.set(1, 0, 0);
+    _xA.normalize();
+    _yA.crossVectors(_zA, _xA).normalize();
+    _m4.makeBasis(_xA, _yA, _zA);
+    const q = out || _q;
+    q.setFromRotationMatrix(_m4);
+    if (s.bank) {
+      _qBank.setFromAxisAngle(_fwd, s.bank);
+      q.multiply(_qBank);
+    }
+    return q;
+  }
+
   // 減速帶幾何
   const bumpGroup = new THREE.Group();
   bumpGroup.name = 'regret-bumps';
@@ -284,32 +318,6 @@ export function createRoom(ctx) {
     orientTo(holder, s);
     bumpGroup.add(holder);
     b.mesh = holder;
-  }
-
-  function orientTo(obj, s) {
-    obj.position.copy(s.pos);
-    obj.quaternion.copy(quatFrom(s));
-  }
-
-  const _zA = new THREE.Vector3(), _yA = new THREE.Vector3(), _xA = new THREE.Vector3();
-  const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _qBank = new THREE.Quaternion();
-  const _fwd = new THREE.Vector3(0, 0, 1);
-  function quatFrom(s, out) {
-    // 車輛本地 -Z = 前進方向 → 本地 +Z 對應 -tangent
-    _zA.copy(s.tangent).normalize().negate();
-    _yA.copy(s.up || _yA.set(0, 1, 0)).normalize();
-    _xA.crossVectors(_yA, _zA);
-    if (_xA.lengthSq() < 1e-8) _xA.set(1, 0, 0);
-    _xA.normalize();
-    _yA.crossVectors(_zA, _xA).normalize();
-    _m4.makeBasis(_xA, _yA, _zA);
-    const q = out || _q;
-    q.setFromRotationMatrix(_m4);
-    if (s.bank) {
-      _qBank.setFromAxisAngle(_fwd, s.bank);
-      q.multiply(_qBank);
-    }
-    return q;
   }
 
   // ── 車陣狀態 ────────────────────────────────────────────────────────────
@@ -462,13 +470,21 @@ export function createRoom(ctx) {
     tweens.push(t);
     return t;
   }
+  /** 取消補間：必須整個移除，不能只把 apply 換掉 —— 否則舊的 onDone 仍會在原定時間覆寫新目標。 */
+  function killTween(t) {
+    if (!t) return;
+    t.dead = true;
+    const i = tweens.indexOf(t);
+    if (i >= 0) tweens.splice(i, 1);
+  }
   function stepTweens(dt) {
     for (let i = tweens.length - 1; i >= 0; i--) {
       const t = tweens[i];
+      if (t.dead) { tweens.splice(i, 1); continue; }
       t.t += dt;
       const k = clamp(t.t / t.dur, 0, 1);
       t.apply(t.ease(k), k);
-      if (k >= 1) { tweens.splice(i, 1); if (t.onDone) t.onDone(); }
+      if (k >= 1) { tweens.splice(i, 1); t.dead = true; if (t.onDone) t.onDone(); }
     }
   }
 
@@ -484,9 +500,9 @@ export function createRoom(ctx) {
       const r = x.c;
       const from = r.relBase;
       const to = x.rel;
-      if (Math.abs(to - from) < 1e-6) { r.relBase = to; continue; }
-      // 同一台車只保留最後一次補間
-      if (r._tw) r._tw.apply = () => {};
+      if (Math.abs(to - from) < 1e-6) { killTween(r._tw); r._tw = null; r.relBase = to; continue; }
+      // 同一台車只保留最後一次補間（舊的必須整個殺掉）
+      killTween(r._tw); r._tw = null;
       r._tw = tween(ms, ease, (e) => { r.relBase = from + (to - from) * e; }, () => { r.relBase = to; r._tw = null; });
     }
   }
@@ -1143,7 +1159,7 @@ ${bp.kind === 'data' ? `<span>這一條不是配備缺少，是你查不到。</
       // 依目前權重排一次（不重複 emit WEIGHTS_CHANGED）
       onWeightChange();
       // 起跑時直接就位，不要從 0 慢慢滑過來
-      for (const r of runners) { if (r._tw) { r._tw.apply = () => {}; r._tw = null; } }
+      for (const r of runners) { killTween(r._tw); r._tw = null; }
       const list = alive().map((c) => ({ c, v: scoreOf(c) })).sort((a, b) => b.v - a.v);
       if (list.length) {
         const vMax = list[0].v, vMin = list[list.length - 1].v;

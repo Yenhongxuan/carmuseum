@@ -1,0 +1,10 @@
+{
+  "series": "sx4",
+  "method": "FAILED",
+  "frameCount": 0,
+  "urlPattern": null,
+  "sourceUrl": null,
+  "colors": [],
+  "notes": "沙盒外網為白名單模式，車廠官網一律回 403 policy denial。未抓到任何影像。",
+  "failReason": "agent proxy connect_rejected: gateway answered 403 to CONNECT (policy denial)"
+}

@@ -1,0 +1,44 @@
+<!doctype html><meta charset="utf-8"><title>room 6 test — 法庭</title>
+<style>html,body{margin:0;height:100%;background:#EDEEF0}#ui{position:fixed;inset:0;pointer-events:none}
+#ui>*{pointer-events:auto}
+#dbg{position:fixed;left:16px;top:16px;z-index:9;max-width:340px;font:12px/1.6 "Noto Sans TC",system-ui,sans-serif;
+ background:rgba(247,248,250,.94);border:1px solid #D5DAE1;padding:12px 14px;color:#1B1E23}
+#dbg h4{margin:0 0 6px;font-size:11px;letter-spacing:.2em;color:#7A8290;font-weight:400}
+#dbg table{border-collapse:collapse;width:100%}#dbg td{padding:2px 0;border-bottom:1px solid #E4E8ED}
+#dbg td:last-child{text-align:right}
+#dbg button{font:inherit;margin-top:8px;background:#fff;border:1px solid #CDD4DD;padding:5px 9px;cursor:pointer}</style>
+<script type="importmap">{"imports":{
+ "three":"../vendor/three/build/three.module.js",
+ "three/addons/":"../vendor/three/addons/"}}</script>
+<div id="ui"></div>
+<div id="dbg"><h4>B8 · 廳六 法庭　立場實算</h4><div id="dbgbody">載入中…</div></div>
+<script type="module">
+import * as THREE from 'three';
+import { makeTestCtx } from '../src/testkit.js';   // 主代理於第 3 階段提供
+import { createRoom, ROOM_KEY } from '../src/rooms/room6_court.js';
+import { STATE } from '../src/contract.js';
+
+const ctx = await makeTestCtx({ mount: document.body, ui: document.getElementById('ui') });
+const room = createRoom(ctx); ctx.scene.add(room.group); room.enter();
+ctx.startLoop((dt, t) => room.update(dt, t, ctx.camera));
+
+// —— 除錯面板：八個立場的 predicate 與實算淘汰台數（全部由 cars.json 算出）——
+const { defs, conflicts } = room._debug;
+document.getElementById('dbgbody').innerHTML =
+  '<table>' + defs.map(d =>
+    `<tr><td title="${d.predicateText.replace(/"/g,'&quot;')}">${d.label}</td><td>${d.count} 台</td></tr>`
+  ).join('') + '</table>'
+  + '<div style="margin-top:8px;color:#7A8290">互斥：'
+  + [...conflicts.keys()].map(k => k.split('|').map(id =>
+      defs.find(d => d.id === id)?.label || id).join(' ↔ ')).join('；')
+  + '</div>'
+  + '<button id="reset">清空立場與被告，重來一次</button>';
+
+document.getElementById('reset').addEventListener('click', () => {
+  STATE.stances.length = 0;
+  STATE.chosenCarId = null;
+  STATE.alive = ctx.cars.map(c => c.id);
+  room.exit(); room.enter();
+});
+window.__room6 = room;   // 手動檢查用
+</script>

@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>room 5 test — 廳五 賽道</title>
+<style>html,body{margin:0;height:100%;background:#EDEEF0}#ui{position:fixed;inset:0;pointer-events:none}
+#ui>*{pointer-events:auto}</style>
+<script type="importmap">{"imports":{
+ "three":"../vendor/three/build/three.module.js",
+ "three/addons/":"../vendor/three/addons/"}}</script>
+<div id="ui"></div>
+<script type="module">
+import * as THREE from 'three';
+import { makeTestCtx } from '../src/testkit.js';   // 主代理於第 3 階段提供
+import { createRoom } from '../src/rooms/room5_circuit.js';
+const ctx = await makeTestCtx({ mount: document.body, ui: document.getElementById('ui') });
+const room = createRoom(ctx); ctx.scene.add(room.group); room.enter();
+ctx.startLoop((dt, t) => room.update(dt, t, ctx.camera));
+window.__room5 = room;   // 驗收用：room._debug.hitCounts() / trackOrder() / scoreOrder()
+</script>

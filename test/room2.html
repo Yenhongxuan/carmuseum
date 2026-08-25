@@ -1,0 +1,78 @@
+<!doctype html><meta charset="utf-8"><title>room 2 test · 廳二 車位</title>
+<style>html,body{margin:0;height:100%;background:#EDEEF0}#ui{position:fixed;inset:0;pointer-events:none}
+#ui>*{pointer-events:auto}
+#help{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:9;
+ font:400 12.5px/1.5 "Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;color:#4A4F57;
+ background:rgba(250,250,251,.92);border:1px solid #DCDFE4;border-radius:8px;padding:6px 12px;
+ box-shadow:0 4px 14px rgba(28,32,38,.08);pointer-events:none;text-align:center}
+#help b{font-weight:600;color:#22252B}</style>
+<script type="importmap">{"imports":{
+ "three":"../vendor/three/build/three.module.js",
+ "three/addons/":"../vendor/three/addons/"}}</script>
+<div id="ui"></div>
+<div id="help"><b>WASD</b> 移動　<b>Q/E</b> 升降　<b>滑鼠拖曳</b> 環視　<b>滾輪</b> 推拉　<b>Shift</b> 加速<br>拖三根滑桿改變車位（拖動中即時變形），39 台會一台一台開進來。</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { makeTestCtx } from '../src/testkit.js';   // 主代理於第 3 階段提供
+import { createRoom } from '../src/rooms/room2_parking.js';
+
+const ctx = await makeTestCtx({ mount: document.body, ui: document.getElementById('ui') });
+const room = createRoom(ctx);
+ctx.scene.add(room.group);
+room.enter();
+
+// 相機起點用 room.spawn（yaw 0 = 朝 -Z）
+const cam = ctx.camera;
+cam.position.set(...room.spawn.pos);
+
+// ── 自由視角：OrbitControls（滑鼠）＋ WASD/QE（鍵盤）──
+const dom = (ctx.renderer && ctx.renderer.domElement) || document.body;
+const controls = new OrbitControls(cam, dom);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.screenSpacePanning = false;
+controls.minDistance = 0.6;
+controls.maxDistance = 120;
+controls.maxPolarAngle = Math.PI * 0.495;
+{
+  const yaw = room.spawn.yaw || 0;
+  const fwd = new THREE.Vector3(Math.sin(yaw), 0, -Math.cos(yaw));
+  controls.target.copy(cam.position).addScaledVector(fwd, 8).setY(1.2);
+}
+controls.update();
+
+const keys = Object.create(null);
+addEventListener('keydown', (e) => { keys[e.code] = true; }, { passive: true });
+addEventListener('keyup',   (e) => { keys[e.code] = false; }, { passive: true });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+const fwd = new THREE.Vector3(), right = new THREE.Vector3(), move = new THREE.Vector3();
+const UP = new THREE.Vector3(0, 1, 0);
+function fly(dt) {
+  const s = (keys.ShiftLeft || keys.ShiftRight ? 18 : 6.5) * dt;
+  move.set(0, 0, 0);
+  cam.getWorldDirection(fwd); fwd.y = 0; if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
+  right.crossVectors(fwd, UP).normalize();
+  if (keys.KeyW) move.add(fwd);
+  if (keys.KeyS) move.sub(fwd);
+  if (keys.KeyD) move.add(right);
+  if (keys.KeyA) move.sub(right);
+  if (keys.KeyE) move.add(UP);
+  if (keys.KeyQ) move.sub(UP);
+  if (move.lengthSq() === 0) return;
+  move.normalize().multiplyScalar(s);
+  cam.position.add(move);
+  controls.target.add(move);
+}
+
+ctx.startLoop((dt, t) => {
+  fly(Math.min(dt, 0.05));
+  controls.update();
+  room.update(dt, t, cam);
+});
+
+// 方便在 console 裡檢查
+globalThis.__room = room;
+globalThis.__ctx = ctx;
+</script>

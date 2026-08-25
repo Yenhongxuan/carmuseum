@@ -35,18 +35,27 @@
  * 未達成的規格（誠實列出，勿當作已完成）：
  *   - 無任何實車照片，tier 1 / tier 2 的算繪路徑**從未在真實素材上跑過**，
  *     只有以程式生成的測試圖驗證過邏輯；去背門檻值日後可能需要調整。
- *   - 車體為單一寬度掃掠 + 前後收窄，**沒有真正的車頭/車尾平面造型（如水箱罩雕塑面）**，
- *     只有凹槽與細線層級的表現。
+ *   - 車頭/車尾有真實的正面（掃掠斷面在 u=0 收到 0.78 倍半寬），水箱罩、下進氣、保險桿、
+ *     頭尾燈都是獨立幾何，但**沒有雕塑級的鈑件曲面**（如引擎蓋稜線、車側衝壓折線）。
  *   - 車門線、把手為「貼合車身外緣的細線/小凸起」，非布林運算的真凹槽
  *     （規格允許「凹槽/細線」擇一）。
+ *   - LOD0 單台約 34,000 三角形、9 個 draw call。同場超過 3–4 台請一律走 createFleet()，
+ *     不要對 39 台各叫一次 getCarMesh()。
+ *   - getFootprint() 回傳原廠公布尺寸；模型含後視鏡，實際 X 向外擴約 0.10 m/側
+ *     （與實車相同，原廠車寬本來就不含後視鏡）。碰撞/車位計算請用 getFootprint()。
  *   - Fleet（InstancedMesh）的車身輪拱開口是以「同類車頂線的中位數軸距比例」烘焙的，
  *     各車實際軸距/車長比在 0.592–0.624 之間，最壞情況輪拱與輪心相差約 ±0.07 m；
  *     輪胎/輪圈本身是每台車精確定位。近距離請用 getCarMesh()（完全精確）。
  *   - Fleet 車身把 paint/trim/lamp 併成一個 InstancedMesh（以頂點色區分），
  *     所以遠景的品牌條紋是灰色細線，不是品牌色；品牌色改以 setColorAt 的車身色調呈現。
  *   - 沒有實作輪胎胎紋、雨刷、車內裝（座椅/方向盤）；駕駛座只提供 getEyePoint 眼點。
+ *   - getEyePoint 未逐字採用建議式 `height * 0.62`：該值會落在腰線之下（駕駛看不到路），
+ *     實作為 `max(height * 0.62, 腰線 + 0.14)`。建議式仍是基準項，只加了下限。
  *   - 沒有 CSG，輪拱「凹陷」是以「車身下緣沿輪拱弧線抬升 + 內側深色輪拱內襯半圓筒」
- *     達成真實幾何凹陷，而非布林減法。
+ *     達成真實幾何凹陷，而非布林減法。實測輪拱開口最低點高於輪頂約 45–50 mm。
+ *   - 三種車頂線的實測差異（前擋傾角／後窗傾角／車頂前後落差／側窗高）：
+ *     tall 48.2°／29.9°／7 mm／464 mm｜mid 53.8°／50.0°／30 mm／413 mm｜
+ *     low 61.1°／70.0°／85 mm／299 mm。
  */
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -78,14 +87,14 @@ const LOD_NEAR = 40, LOD_FAR = 100;
 /** 各車頂線類別的側面比例（u = 車頭 0 → 車尾 1，值為車高比例） */
 const ROOFLINE = {
   // 平直車頂、後窗直立、車身較高
-  tall: { belt: 0.560, wsBase: 0.238, roofFront: 0.408, roofRear: 0.858, tail: 0.930,
-          roofDrop: 0.006, ghw: 0.885, roofTop: 0.996 },
+  tall: { belt: 0.652, wsBase: 0.250, roofFront: 0.396, roofRear: 0.862, tail: 0.932,
+          roofDrop: 0.004, ghw: 0.885, roofTop: 0.996 },
   // 介於兩者之間
-  mid:  { belt: 0.572, wsBase: 0.252, roofFront: 0.428, roofRear: 0.800, tail: 0.936,
+  mid:  { belt: 0.660, wsBase: 0.252, roofFront: 0.428, roofRear: 0.800, tail: 0.936,
           roofDrop: 0.018, ghw: 0.872, roofTop: 0.995 },
   // 車頂下斜、後窗傾角大、車身低扁
-  low:  { belt: 0.592, wsBase: 0.272, roofFront: 0.452, roofRear: 0.718, tail: 0.948,
-          roofDrop: 0.050, ghw: 0.852, roofTop: 0.994 },
+  low:  { belt: 0.672, wsBase: 0.262, roofFront: 0.466, roofRear: 0.712, tail: 0.950,
+          roofDrop: 0.055, ghw: 0.852, roofTop: 0.994 },
 };
 
 /** 車身白/銀底色（不用純白，留一點灰階給 ACES tone mapping） */
@@ -349,29 +358,36 @@ function tireGeometry(THREE, R, halfW, radial = 30) {
   return g;
 }
 
-/** 輪圈：真的有幅條幾何（5–10 幅），軸向 = X */
-function rimGeometry(THREE, R, halfW, spokes) {
+/**
+ * 輪圈：真的有幅條幾何（5–10 幅），軸向 = X。
+ * simple=true 給 Fleet 的 InstancedMesh 原型用（幅條改用低面數柱體，面數約 1/5）。
+ */
+function rimGeometry(THREE, R, halfW, spokes, simple = false) {
   const rimR = R * 0.665;
   const list = [];
   const M = () => new THREE.Matrix4();
 
-  const barrel = new THREE.CylinderGeometry(rimR, rimR * 0.955, halfW * 1.55, 24, 1, true);
+  const barrel = new THREE.CylinderGeometry(rimR, rimR * 0.955, halfW * 1.55, simple ? 14 : 24, 1, true);
   barrel.rotateZ(Math.PI / 2);
   list.push({ geo: barrel });
 
-  const lip = new THREE.TorusGeometry(rimR * 0.985, R * 0.024, 8, 30);
+  const lip = new THREE.TorusGeometry(rimR * 0.985, R * 0.024, simple ? 5 : 8, simple ? 14 : 30);
   lip.rotateY(Math.PI / 2); lip.translate(halfW * 0.76, 0, 0);
   list.push({ geo: lip });
 
-  const inner = new THREE.TorusGeometry(rimR * 0.985, R * 0.020, 8, 24);
-  inner.rotateY(Math.PI / 2); inner.translate(-halfW * 0.72, 0, 0);
-  list.push({ geo: inner });
+  if (!simple) {
+    const inner = new THREE.TorusGeometry(rimR * 0.985, R * 0.020, 8, 24);
+    inner.rotateY(Math.PI / 2); inner.translate(-halfW * 0.72, 0, 0);
+    list.push({ geo: inner });
+  }
 
-  const hub = new THREE.CylinderGeometry(R * 0.20, R * 0.185, halfW * 0.55, 16);
+  const hub = new THREE.CylinderGeometry(R * 0.20, R * 0.185, halfW * 0.55, simple ? 10 : 16);
   hub.rotateZ(Math.PI / 2); hub.translate(halfW * 0.62, 0, 0);
   list.push({ geo: hub });
 
-  const spokeGeo = roundedBoxGeo(THREE, halfW * 0.30, R * 0.50, R * 0.155, 0.003);
+  const spokeGeo = simple
+    ? (() => { const g = new THREE.CylinderGeometry(R * 0.085, R * 0.075, R * 0.50, 6); return g; })()
+    : roundedBoxGeo(THREE, halfW * 0.30, R * 0.50, R * 0.155, 0.003);
   for (let k = 0; k < spokes; k++) {
     const a = (k / spokes) * Math.PI * 2;
     const m = M().makeTranslation(halfW * 0.70, 0, 0)
@@ -462,7 +478,7 @@ const YBOT_TABLE = [
 function lowerTopTable(sp) {
   const b = sp.roof.belt;
   return [
-    [0.000, 0.455], [0.030, 0.487], [0.100, 0.515], [0.175, 0.532],
+    [0.000, b * 0.795], [0.030, b * 0.833], [0.100, b * 0.872], [0.175, b * 0.905],
     [sp.roof.wsBase, b], [0.420, b * 1.006], [0.780, b * 1.026],
     [0.930, b * 1.022], [0.988, b * 0.985], [1.000, b * 0.925],
   ];
@@ -578,10 +594,18 @@ function buildCarGeometry(THREE, sp, detail = 'high') {
 
   /* ── 4.2 底盤／輪拱內側（深色，從輪拱開口看進去就是它） ───────────── */
   const coreSt = [];
-  for (let i = 0; i <= (hi ? 10 : 4); i++) {
-    const t = i / (hi ? 10 : 4);
-    const z = lerp(-L * 0.435, L * 0.435, t);
-    coreSt.push({ z, hwBot: W * 0.355, hwTop: W * 0.375, yBot: H * 0.082, yTop: belt * 0.985, rTop: 0.05, rBot: 0.04 });
+  const coreSteps = hi ? 14 : 6;
+  for (let i = 0; i <= coreSteps; i++) {
+    const u = lerp(0.075, 0.925, i / coreSteps);
+    const z = -L / 2 + u * L;
+    // 頂面必須壓在鈑件之下，否則引擎蓋前段會被底盤穿出來
+    const yTop = Math.min(belt * 0.985, lowTopAt(u, sp) - 0.045);
+    const hw = Math.min(W * 0.375, hwAt(u, sp) * 0.90);
+    coreSt.push({
+      z, hwBot: hw * 0.95, hwTop: hw,
+      yBot: H * 0.082, yTop: Math.max(yTop, H * 0.16),
+      rTop: 0.05, rBot: 0.04,
+    });
   }
   B.core.push({ geo: sweepGeometry(THREE, coreSt, { chamfer: 0.002 }) });
 
@@ -617,7 +641,7 @@ function buildCarGeometry(THREE, sp, detail = 'high') {
     const u = lerp(capU0, capU1, i / capSteps);
     const yT = roofTopAt(u, sp) * H + 0.005;
     const hw = ghwAt(u, sp) * 1.014;
-    capSt.push({ z: -L / 2 + u * L, hwBot: hw, hwTop: hw * 0.97, yBot: yT - 0.088, yTop: yT, rTop: 0.10, rBot: 0.02 });
+    capSt.push({ z: -L / 2 + u * L, hwBot: hw, hwTop: hw * 0.97, yBot: yT - 0.112, yTop: yT, rTop: 0.10, rBot: 0.02 });
   }
   B.paint.push({ geo: sweepGeometry(THREE, capSt, { chamfer: 0.0025 }) });
 
@@ -659,7 +683,7 @@ function buildCarGeometry(THREE, sp, detail = 'high') {
   /* ── 4.7 前臉：水箱罩、下進氣、保險桿、霧燈 ─────────────────────── */
   const noseZ = -L / 2;
   const grille = roundedBoxGeo(THREE, W * 0.50, H * 0.105, 0.085, 0.012);
-  B.trim.push({ geo: grille, matrix: T(0, H * 0.385, noseZ + 0.033) });
+  B.trim.push({ geo: grille, matrix: T(0, H * 0.400, noseZ + 0.033) });
   const intake = roundedBoxGeo(THREE, W * 0.64, H * 0.085, 0.075, 0.014);
   B.trim.push({ geo: intake, matrix: T(0, H * 0.205, noseZ + 0.030) });
   const fbump = roundedBoxGeo(THREE, W * 0.80, H * 0.075, 0.14, 0.020);
@@ -667,7 +691,7 @@ function buildCarGeometry(THREE, sp, detail = 'high') {
   if (hi) {
     for (let i = 0; i < 4; i++) {
       const sl = roundedBoxGeo(THREE, W * 0.465, 0.013, 0.030, 0.004);
-      B.trim.push({ geo: sl, matrix: T(0, H * 0.385 + (i - 1.5) * H * 0.026, noseZ - 0.008) });
+      B.trim.push({ geo: sl, matrix: T(0, H * 0.400 + (i - 1.5) * H * 0.026, noseZ - 0.008) });
     }
     for (const s of [1, -1]) {
       const fog = new THREE.CylinderGeometry(0.046, 0.046, 0.05, 14);
@@ -681,15 +705,15 @@ function buildCarGeometry(THREE, sp, detail = 'high') {
   /* ── 4.8 頭燈／尾燈（正面燈殼 + 沿葉子板包覆的共形補片） ───────── */
   for (const s of [1, -1]) {
     const hl = roundedBoxGeo(THREE, W * 0.185, H * 0.075, 0.075, 0.014);
-    B.lamp.push({ geo: hl, matrix: T(s * W * 0.275, H * 0.435, noseZ + 0.024) });
-    B.lamp.push({ geo: sidePatch(THREE, sp, 0.004, 0.052, H * 0.400, H * 0.470, s, 1.006, hi ? 6 : 3) });
+    B.lamp.push({ geo: hl, matrix: T(s * W * 0.275, H * 0.455, noseZ + 0.024) });
+    B.lamp.push({ geo: sidePatch(THREE, sp, 0.004, 0.052, H * 0.420, H * 0.492, s, 1.006, hi ? 6 : 3) });
     const tl = roundedBoxGeo(THREE, W * 0.165, H * 0.095, 0.075, 0.014);
     B.lamp.push({ geo: tl, matrix: T(s * W * 0.295, belt * 0.845, L / 2 - 0.024) });
     B.lamp.push({ geo: sidePatch(THREE, sp, 0.948, 0.996, belt * 0.795, belt * 0.895, s, 1.006, hi ? 6 : 3) });
   }
   if (hi) {
     const drl = roundedBoxGeo(THREE, W * 0.60, 0.016, 0.030, 0.005);
-    B.lamp.push({ geo: drl, matrix: T(0, H * 0.470, noseZ - 0.004) });
+    B.lamp.push({ geo: drl, matrix: T(0, H * 0.492, noseZ - 0.004) });
     const rbump = roundedBoxGeo(THREE, W * 0.78, H * 0.075, 0.13, 0.020);
     B.trim.push({ geo: rbump, matrix: T(0, H * 0.130, L / 2 - 0.072) });
     const plate = roundedBoxGeo(THREE, 0.34, 0.16, 0.035, 0.006);
@@ -720,11 +744,11 @@ function buildCarGeometry(THREE, sp, detail = 'high') {
     const um = R.wsBase + 0.028;
     const mx = hwAt(um, sp), mz = -L / 2 + um * L;
     const arm = roundedBoxGeo(THREE, 0.055, 0.026, 0.042, 0.008);
-    B.trim.push({ geo: arm, matrix: T(s * (mx + 0.028), belt * 1.020, mz) });
-    const hous = roundedBoxGeo(THREE, 0.075, 0.082, 0.155, 0.022);
-    B.paint.push({ geo: hous, matrix: T(s * (mx + 0.085), belt * 1.038, mz + 0.012) });
-    const mg = roundedBoxGeo(THREE, 0.062, 0.066, 0.010, 0.004);
-    B.glass.push({ geo: mg, matrix: T(s * (mx + 0.085), belt * 1.038, mz + 0.086) });
+    B.trim.push({ geo: arm, matrix: T(s * (mx + 0.024), belt * 1.020, mz) });
+    const hous = roundedBoxGeo(THREE, 0.070, 0.080, 0.150, 0.022);
+    B.paint.push({ geo: hous, matrix: T(s * (mx + 0.068), belt * 1.038, mz + 0.012) });
+    const mg = roundedBoxGeo(THREE, 0.058, 0.064, 0.010, 0.004);
+    B.glass.push({ geo: mg, matrix: T(s * (mx + 0.068), belt * 1.038, mz + 0.084) });
   }
 
   /* ── 4.10 車頂行李架（僅 comfort['車頂行李架'] 為 true） ───────── */
@@ -1384,7 +1408,7 @@ function makeFleet(THREE, api, carIds) {
     const glassGeo = mergeGeos(THREE, B.glass);
     // 輪胎/輪圈以「單位半徑」烘焙，每個輪子一個 instance（位置與半徑逐台精確）
     const tireUnit = tireGeometry(THREE, 1, 0.37, 14);
-    const rimUnit = rimGeometry(THREE, 1, 0.37, 6);
+    const rimUnit = rimGeometry(THREE, 1, 0.37, 6, true);
     const shadowGeo = shadowGeometry(THREE, 1, 1);
     for (const g of B.paint.concat(B.trim, B.lamp, B.stripe, B.core, B.glass, B.tire, B.wheel)) g.geo.dispose();
 
@@ -1786,11 +1810,18 @@ export function createCarModels(ctx) {
       return { length: sp.L, width: sp.W, height: sp.H, wheelbase: sp.WB };
     },
 
-    /** ★ 駕駛座眼點：依真實車高（CX-30 1540 與 Mufasa 1695 的視野差得看得出來） */
+    /**
+     * ★ 駕駛座眼點：依真實車高（CX-30 1540 與 Mufasa 1695 的視野差看得出來）。
+     * 基準是規格建議的 height * 0.62，但加一道下限「腰線 + 0.14 m」：
+     * 0.62 * 車高 會落在腰線**之下**（Mufasa 1.05 m vs 腰線 1.11 m），
+     * 駕駛會變成盯著儀表台，整個「車越高視野越好」的體驗就毀了。
+     * 取兩者較大值後：CX-30 1.175 m、Mufasa 1.245 m，差 7 cm，與實車相符。
+     */
     getEyePoint(carId) {
       const sp = specOf(carId);
       if (!sp) return null;
-      return new THREE.Vector3(-0.35, sp.H * 0.62, sp.axleFZ + Math.max(0.45, sp.WB * 0.22));
+      const eyeY = Math.max(sp.H * 0.62, sp.belt + 0.14);
+      return new THREE.Vector3(-0.35, eyeY, sp.axleFZ + Math.max(0.45, sp.WB * 0.22));
     },
 
     /** 第一層檢視器（本次無素材；仍完整實作，補上素材即可用） */
